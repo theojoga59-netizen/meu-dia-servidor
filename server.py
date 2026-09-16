@@ -1,3 +1,4 @@
+```python
 import os
 from flask import Flask, jsonify
 
@@ -6,7 +7,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def inicio():
-    chave_configurada = bool(os.environ.get("chave aqui"))
+    chave_configurada = bool(os.environ.get("GEMINI_API_KEY"))
 
     return jsonify({
         "status": "online",
@@ -27,3 +28,4 @@ def status():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+```
