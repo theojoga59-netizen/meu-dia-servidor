@@ -50,26 +50,25 @@ return jsonify({
             "erro": "A pergunta está vazia."
         }), 400
 
-    prompt = """
-```
+    prompt = (
+        "Você é o assistente de inteligência artificial do aplicativo Meu Dia.\n\n"
+        "Responda sempre em português do Brasil.\n\n"
+        "Pergunta do usuário:\n"
+        + pergunta
+        + "\n\n"
+        "Contexto do aplicativo Meu Dia:\n"
+        + contexto
+        + "\n\n"
+        "Use o contexto quando for útil.\n"
+        "Não invente informações.\n"
+        "Seja claro, natural e útil."
+    )
 
-Você é o assistente de inteligência artificial do aplicativo Meu Dia.
-
-Responda sempre em português do Brasil.
-
-Pergunta do usuário:
-""" + pergunta + """
-
-Contexto do aplicativo Meu Dia:
-""" + contexto + """
-
-Use o contexto quando for útil.
-Não invente informações.
-Seja claro, natural e útil.
-"""
-
-```
-    url = "https://generativelanguage.googleapis.com/v1beta/models/" + MODELO_GEMINI + ":generateContent"
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + MODELO_GEMINI
+        + ":generateContent"
+    )
 
     corpo = {
         "contents": [
@@ -91,20 +90,32 @@ Seja claro, natural e útil.
         method="POST",
         headers={
             "Content-Type": "application/json",
+            "Accept": "application/json",
             "x-goog-api-key": GEMINI_API_KEY
         }
     )
 
     try:
-        with urllib.request.urlopen(requisicao, timeout=60) as resposta:
+        with urllib.request.urlopen(
+            requisicao,
+            timeout=60
+        ) as resposta:
             resposta_texto = resposta.read().decode("utf-8")
 
     except urllib.error.HTTPError as erro:
-        corpo_erro = erro.read().decode("utf-8", errors="replace")
+        corpo_erro = erro.read().decode(
+            "utf-8",
+            errors="replace"
+        )
 
         try:
             erro_json = json.loads(corpo_erro)
-            mensagem = erro_json.get("error", {}).get("message", "")
+
+            mensagem = (
+                erro_json
+                .get("error", {})
+                .get("message", "")
+            )
 
             if not mensagem:
                 mensagem = corpo_erro
@@ -161,4 +172,4 @@ app.run(
     host="0.0.0.0",
     port=port
 )
-```
+
