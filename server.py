@@ -30,7 +30,14 @@ def status():
 
 @app.route("/perguntar", methods=["POST"])
 def perguntar():
+
+    print("========================================")
+    print("RECEBIDO PEDIDO EM /perguntar")
+    print("========================================")
+
     if not GEMINI_API_KEY:
+        print("ERRO: GEMINI_API_KEY não configurada.")
+
         return jsonify({
             "erro": "A chave GEMINI_API_KEY não está configurada no servidor."
         }), 500
@@ -41,7 +48,11 @@ def perguntar():
         pergunta = str(dados.get("pergunta", "")).strip()
         contexto = str(dados.get("contexto", "")).strip()
 
+        print("Pergunta recebida:", pergunta)
+
         if not pergunta:
+            print("ERRO: pergunta vazia.")
+
             return jsonify({
                 "erro": "Nenhuma pergunta foi enviada."
             }), 400
@@ -65,9 +76,14 @@ Use essas informações quando forem úteis para responder.
             "gemini-2.5-flash-lite"
         ]
 
-        ultimo_erro = "Não foi possível obter resposta do Gemini."
+        ultimo_erro = ""
 
         for modelo in modelos:
+
+            print("----------------------------------------")
+            print("Tentando modelo:", modelo)
+            print("----------------------------------------")
+
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 + modelo
@@ -99,62 +115,135 @@ Use essas informações quando forem úteis para responder.
             )
 
             try:
+
                 with urllib.request.urlopen(
                     requisicao,
                     timeout=60
                 ) as resposta_http:
 
-                    resposta_texto = resposta_http.read().decode("utf-8")
+                    resposta_texto = resposta_http.read().decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+
+                    print("Resposta recebida do Google:")
+                    print(resposta_texto)
+
                     resposta_json = json.loads(resposta_texto)
 
                     candidatos = resposta_json.get("candidates", [])
 
                     if candidatos:
-                        conteudo = candidatos[0].get("content", {})
-                        partes = conteudo.get("parts", [])
+
+                        conteudo = candidatos[0].get(
+                            "content",
+                            {}
+                        )
+
+                        partes = conteudo.get(
+                            "parts",
+                            []
+                        )
 
                         if partes:
-                            texto = partes[0].get("text", "").strip()
+
+                            texto = partes[0].get(
+                                "text",
+                                ""
+                            ).strip()
 
                             if texto:
+
+                                print("SUCESSO! Gemini respondeu.")
+
                                 return jsonify({
                                     "resposta": texto
                                 })
 
-                    ultimo_erro = "O Gemini não retornou texto."
+                    ultimo_erro = (
+                        "O Gemini respondeu, mas não retornou texto."
+                    )
+
+                    print("ERRO:", ultimo_erro)
 
             except urllib.error.HTTPError as erro:
-                corpo_erro = erro.read().decode("utf-8", errors="replace")
+
+                corpo_erro = erro.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+
+                print("----------------------------------------")
+                print("ERRO HTTP DO GOOGLE")
+                print("Código:", erro.code)
+                print("Resposta:", corpo_erro)
+                print("----------------------------------------")
 
                 try:
+
                     erro_json = json.loads(corpo_erro)
+
                     mensagem = (
                         erro_json
                         .get("error", {})
                         .get("message", "")
                     )
+
+                    status_google = (
+                        erro_json
+                        .get("error", {})
+                        .get("status", "")
+                    )
+
+                    detalhes_google = (
+                        erro_json
+                        .get("error", {})
+                        .get("details", [])
+                    )
+
                 except Exception:
+
                     mensagem = corpo_erro
+                    status_google = ""
+                    detalhes_google = []
 
                 ultimo_erro = mensagem or f"HTTP {erro.code}"
 
                 if erro.code in (401, 403):
+
                     return jsonify({
-                        "erro": "A chave Gemini não foi aceita pelo Google.",
-                        "detalhes": ultimo_erro
+                        "erro": "O Google recusou a chave da API.",
+                        "detalhes": ultimo_erro,
+                        "status_google": status_google
                     }), erro.code
 
                 if erro.code == 429:
+
                     return jsonify({
-                        "erro": "O limite do Gemini foi atingido.",
-                        "detalhes": ultimo_erro
+                        "erro": "O limite de uso do Gemini foi atingido.",
+                        "detalhes": ultimo_erro,
+                        "status_google": status_google
                     }), 429
+
+                if erro.code == 404:
+
+                    continue
 
                 continue
 
             except Exception as erro:
+
                 ultimo_erro = str(erro)
+
+                print("ERRO AO CONECTAR COM GEMINI:")
+                print(ultimo_erro)
+
                 continue
+
+        print("========================================")
+        print("FALHA FINAL")
+        print("Último erro:", ultimo_erro)
+        print("========================================")
 
         return jsonify({
             "erro": "Não foi possível obter uma resposta do Gemini.",
@@ -162,6 +251,12 @@ Use essas informações quando forem úteis para responder.
         }), 500
 
     except Exception as erro:
+
+        print("========================================")
+        print("ERRO INTERNO DO SERVIDOR")
+        print(str(erro))
+        print("========================================")
+
         return jsonify({
             "erro": "Erro interno no servidor.",
             "detalhes": str(erro)
@@ -169,7 +264,14 @@ Use essas informações quando forem úteis para responder.
 
 
 if __name__ == "__main__":
-    porta = int(os.environ.get("PORT", 5000))
+
+    porta = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
     app.run(
         host="0.0.0.0",
         port=porta
