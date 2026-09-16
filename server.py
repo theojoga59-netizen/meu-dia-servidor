@@ -2,7 +2,6 @@ import os
 import json
 import urllib.request
 import urllib.error
-
 from flask import Flask, jsonify, request
 
 app = Flask(**name**)
@@ -13,16 +12,12 @@ MODELO_GEMINI = "gemini-2.5-flash"
 
 @app.route("/")
 def inicio():
-chave_configurada = bool(GEMINI_API_KEY)
-
-```
 return jsonify({
-    "status": "online",
-    "servidor": "Meu Dia",
-    "gemini_configurado": chave_configurada,
-    "mensagem": "Servidor funcionando corretamente!"
+"status": "online",
+"servidor": "Meu Dia",
+"gemini_configurado": bool(GEMINI_API_KEY),
+"mensagem": "Servidor funcionando corretamente!"
 })
-```
 
 @app.route("/status")
 def status():
@@ -55,7 +50,7 @@ return jsonify({
             "erro": "A pergunta está vazia."
         }), 400
 
-    prompt = f"""
+    prompt = """
 ```
 
 Você é o assistente de inteligência artificial do aplicativo Meu Dia.
@@ -63,10 +58,10 @@ Você é o assistente de inteligência artificial do aplicativo Meu Dia.
 Responda sempre em português do Brasil.
 
 Pergunta do usuário:
-{pergunta}
+""" + pergunta + """
 
 Contexto do aplicativo Meu Dia:
-{contexto}
+""" + contexto + """
 
 Use o contexto quando for útil.
 Não invente informações.
@@ -74,11 +69,7 @@ Seja claro, natural e útil.
 """
 
 ```
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + MODELO_GEMINI
-        + ":generateContent"
-    )
+    url = "https://generativelanguage.googleapis.com/v1beta/models/" + MODELO_GEMINI + ":generateContent"
 
     corpo = {
         "contents": [
@@ -105,28 +96,15 @@ Seja claro, natural e útil.
     )
 
     try:
-        with urllib.request.urlopen(
-            requisicao,
-            timeout=60
-        ) as resposta:
-
+        with urllib.request.urlopen(requisicao, timeout=60) as resposta:
             resposta_texto = resposta.read().decode("utf-8")
 
     except urllib.error.HTTPError as erro:
-
-        corpo_erro = erro.read().decode(
-            "utf-8",
-            errors="replace"
-        )
+        corpo_erro = erro.read().decode("utf-8", errors="replace")
 
         try:
             erro_json = json.loads(corpo_erro)
-
-            mensagem = (
-                erro_json
-                .get("error", {})
-                .get("message", "")
-            )
+            mensagem = erro_json.get("error", {}).get("message", "")
 
             if not mensagem:
                 mensagem = corpo_erro
@@ -147,15 +125,8 @@ Seja claro, natural e útil.
             "erro": "O Gemini não retornou uma resposta."
         }), 500
 
-    conteudo = candidatos[0].get(
-        "content",
-        {}
-    )
-
-    partes = conteudo.get(
-        "parts",
-        []
-    )
+    conteudo = candidatos[0].get("content", {})
+    partes = conteudo.get("parts", [])
 
     textos = []
 
@@ -177,22 +148,15 @@ Seja claro, natural e útil.
     })
 
 except Exception as erro:
-
     return jsonify({
         "erro": "Erro interno do servidor: " + str(erro)
     }), 500
 ```
 
 if **name** == "**main**":
+port = int(os.environ.get("PORT", 10000))
 
 ```
-port = int(
-    os.environ.get(
-        "PORT",
-        10000
-    )
-)
-
 app.run(
     host="0.0.0.0",
     port=port
