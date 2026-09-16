@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def inicio():
-    chave_configurada = bool(os.environ.get("GEMINI_API_KEY"))
+    chave_configurada = bool(os.environ.get("chave aqui"))
 
     return jsonify({
         "status": "online",
