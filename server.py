@@ -3,7 +3,6 @@ import os
 import urllib.request
 import urllib.error
 import json
-
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
