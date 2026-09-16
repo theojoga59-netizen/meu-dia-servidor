@@ -3,6 +3,7 @@ import os
 import urllib.request
 import urllib.error
 import json
+
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -120,6 +121,8 @@ Use essas informacoes quando forem uteis para responder.
                 candidatos = resposta_json.get("candidates", [])
 
                 if not candidatos:
+                    print("O GEMINI NAO RETORNOU CANDIDATOS.")
+
                     return jsonify({
                         "erro": "O Gemini nao retornou uma resposta.",
                         "detalhes": resposta_texto
@@ -136,6 +139,8 @@ Use essas informacoes quando forem uteis para responder.
                 )
 
                 if not partes:
+                    print("O GEMINI NAO RETORNOU PARTES DE TEXTO.")
+
                     return jsonify({
                         "erro": "O Gemini nao retornou texto.",
                         "detalhes": resposta_texto
@@ -152,7 +157,7 @@ Use essas informacoes quando forem uteis para responder.
                         "detalhes": resposta_texto
                     }), 500
 
-                print("SUCESSO! Gemini respondeu.")
+                print("SUCESSO! GEMINI RESPONDEU.")
 
                 return jsonify({
                     "resposta": texto
@@ -172,6 +177,7 @@ Use essas informacoes quando forem uteis para responder.
             print("========================================")
 
             try:
+
                 erro_json = json.loads(corpo_erro)
 
                 mensagem = (
@@ -181,6 +187,7 @@ Use essas informacoes quando forem uteis para responder.
                 )
 
             except Exception:
+
                 mensagem = corpo_erro
 
             if not mensagem:
@@ -193,7 +200,7 @@ Use essas informacoes quando forem uteis para responder.
         except Exception as erro:
 
             print("========================================")
-            print("ERRO AO ACESSAR GEMINI")
+            print("ERRO AO ACESSAR O GEMINI")
             print(str(erro))
             print("========================================")
 
@@ -204,7 +211,7 @@ Use essas informacoes quando forem uteis para responder.
     except Exception as erro:
 
         print("========================================")
-        print("ERRO INTERNO")
+        print("ERRO INTERNO DO SERVIDOR")
         print(str(erro))
         print("========================================")
 
@@ -214,7 +221,13 @@ Use essas informacoes quando forem uteis para responder.
 
 
 if __name__ == "__main__":
-    porta = int(os.environ.get("PORT", 5000))
+
+    porta = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
