@@ -69,7 +69,7 @@ Informacoes do Meu Dia:
 Use essas informacoes quando forem uteis para responder.
 """
 
-        modelo = "gemini-2.5-flash"
+        modelo = "gemini-3.6-flash"
 
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
