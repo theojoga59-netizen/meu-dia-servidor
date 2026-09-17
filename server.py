@@ -1,310 +1,505 @@
-```kotlin
-package com.meudia.app
+from flask import Flask, jsonify, request
+import os
+import urllib.request
+import urllib.error
+import json
+import time
+import random
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+app = Flask(__name__)
 
-class IaViewModel : ViewModel() {
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-    companion object {
-        private const val URL_SERVIDOR =
-            "https://meu-dia-servidor.onrender.com/perguntar"
+# Modelos em ordem de tentativa.
+# Se um estiver temporariamente indisponivel,
+# o servidor tenta automaticamente o proximo.
+MODELOS_GEMINI = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite"
+]
 
-        private const val TIMEOUT_CONEXAO = 30000
-        private const val TIMEOUT_LEITURA = 60000
-    }
+# Quantas tentativas serao feitas para cada modelo.
+TENTATIVAS_POR_MODELO = 2
 
-    var respostaAtual by mutableStateOf(
-        "Olá! Como posso ajudar o seu dia hoje?"
+# Erros que normalmente indicam problema temporario.
+ERROS_TEMPORARIOS = [
+    408,
+    429,
+    500,
+    502,
+    503,
+    504
+]
+
+
+@app.route("/")
+def inicio():
+    return jsonify({
+        "servidor": "Meu Dia",
+        "status": "online",
+        "mensagem": "Servidor funcionando corretamente!",
+        "gemini_configurado": bool(GEMINI_API_KEY)
+    })
+
+
+@app.route("/status")
+def status():
+    return jsonify({
+        "servidor": "Meu Dia",
+        "status": "online",
+        "gemini_configurado": bool(GEMINI_API_KEY),
+        "modelos": MODELOS_GEMINI
+    })
+
+
+def montar_url(modelo):
+    return (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + modelo
+        + ":generateContent?key="
+        + GEMINI_API_KEY
     )
-        private set
 
-    var isLoading by mutableStateOf(false)
-        private set
 
-    var comandoPendente by mutableStateOf<RespostaServidor?>(null)
-        private set
+def enviar_para_gemini(modelo, dados_envio):
 
-    fun perguntarAoServidor(
-        pergunta: String,
-        contextoLocal: String
-    ) {
-        if (pergunta.isBlank()) {
-            respostaAtual = "Digite ou fale alguma coisa."
-            return
-        }
+    url = montar_url(modelo)
 
-        viewModelScope.launch {
+    ultimo_erro = None
 
-            isLoading = true
+    for tentativa in range(
+        1,
+        TENTATIVAS_POR_MODELO + 1
+    ):
 
-            try {
+        print("========================================")
+        print("MODELO:", modelo)
+        print(
+            "TENTATIVA:",
+            tentativa,
+            "DE",
+            TENTATIVAS_POR_MODELO
+        )
+        print("========================================")
 
-                val respostaJson = withContext(Dispatchers.IO) {
-                    enviarPostParaRender(
-                        pergunta = pergunta.trim(),
-                        contexto = contextoLocal
-                    )
-                }
+        requisicao = urllib.request.Request(
+            url,
+            data=dados_envio,
+            headers={
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
 
-                if (respostaJson == null) {
+        try:
 
-                    respostaAtual =
-                        "Não consegui receber uma resposta do servidor Meu Dia."
+            with urllib.request.urlopen(
+                requisicao,
+                timeout=60
+            ) as resposta_http:
 
-                } else {
+                resposta_texto = resposta_http.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
 
-                    processarRespostaServidor(respostaJson)
-                }
+                print("SUCESSO COM O MODELO:", modelo)
 
-            } catch (e: Exception) {
+                return resposta_texto
 
-                respostaAtual =
-                    "Erro ao comunicar com o servidor: ${e.localizedMessage ?: "erro desconhecido"}"
+        except urllib.error.HTTPError as erro:
 
-            } finally {
+            ultimo_erro = erro
 
-                isLoading = false
-            }
-        }
-    }
-
-    private fun processarRespostaServidor(
-        respostaJson: String
-    ) {
-
-        try {
-
-            val json = JSONObject(respostaJson)
-
-            val erro = json.optString("erro", "")
-
-            if (erro.isNotBlank()) {
-
-                respostaAtual = "Servidor: $erro"
-
-                return
-            }
-
-            val tipo = json.optString(
-                "tipo",
-                "RESPOSTA"
+            corpo_erro = erro.read().decode(
+                "utf-8",
+                errors="replace"
             )
 
-            val resposta = json.optString(
-                "resposta",
+            print("========================================")
+            print("ERRO DO GOOGLE")
+            print("MODELO:", modelo)
+            print("CODIGO:", erro.code)
+            print("RESPOSTA:", corpo_erro)
+            print("========================================")
+
+            # Se nao for um erro temporario,
+            # nao adianta ficar repetindo.
+            if erro.code not in ERROS_TEMPORARIOS:
+                raise erro
+
+            # Se ainda houver outra tentativa neste modelo,
+            # espera um pouco e tenta novamente.
+            if tentativa < TENTATIVAS_POR_MODELO:
+
+                espera = (
+                    (2 ** (tentativa - 1))
+                    + random.uniform(0.5, 1.5)
+                )
+
+                print(
+                    "Erro temporario.",
+                    "Nova tentativa em",
+                    round(espera, 1),
+                    "segundos."
+                )
+
+                time.sleep(espera)
+
+                continue
+
+            # Acabaram as tentativas deste modelo.
+            print(
+                "MODELO",
+                modelo,
+                "NAO RESPONDEU."
+            )
+
+            return None
+
+        except urllib.error.URLError as erro:
+
+            ultimo_erro = erro
+
+            print("========================================")
+            print("ERRO DE CONEXAO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+            print("========================================")
+
+            if tentativa < TENTATIVAS_POR_MODELO:
+
+                espera = (
+                    (2 ** (tentativa - 1))
+                    + random.uniform(0.5, 1.5)
+                )
+
+                print(
+                    "Tentando novamente em",
+                    round(espera, 1),
+                    "segundos."
+                )
+
+                time.sleep(espera)
+
+                continue
+
+            return None
+
+        except Exception as erro:
+
+            ultimo_erro = erro
+
+            print("========================================")
+            print("ERRO DESCONHECIDO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+            print("========================================")
+
+            return None
+
+    return None
+
+
+def extrair_resposta(resposta_texto):
+
+    resposta_json = json.loads(
+        resposta_texto
+    )
+
+    candidatos = resposta_json.get(
+        "candidates",
+        []
+    )
+
+    if not candidatos:
+        return ""
+
+    conteudo = candidatos[0].get(
+        "content",
+        {}
+    )
+
+    partes = conteudo.get(
+        "parts",
+        []
+    )
+
+    if not partes:
+        return ""
+
+    textos = []
+
+    for parte in partes:
+
+        texto_parte = parte.get(
+            "text",
+            ""
+        )
+
+        if texto_parte:
+            textos.append(
+                texto_parte
+            )
+
+    texto = "\n".join(
+        textos
+    ).strip()
+
+    return texto
+
+
+@app.route("/perguntar", methods=["POST"])
+def perguntar():
+
+    print("")
+    print("========================================")
+    print("PEDIDO RECEBIDO EM /perguntar")
+    print("========================================")
+
+    if not GEMINI_API_KEY:
+
+        print(
+            "ERRO: GEMINI_API_KEY nao configurada."
+        )
+
+        return jsonify({
+            "erro": (
+                "A chave GEMINI_API_KEY "
+                "nao esta configurada no servidor."
+            )
+        }), 500
+
+    try:
+
+        dados = request.get_json(
+            silent=True
+        ) or {}
+
+        pergunta = str(
+            dados.get(
+                "pergunta",
                 ""
             )
+        ).strip()
 
-            if (tipo == "COMANDO") {
+        contexto = str(
+            dados.get(
+                "contexto",
+                ""
+            )
+        ).strip()
 
-                val comando = RespostaServidor(
-                    tipo = "COMANDO",
-                    resposta = resposta.ifBlank {
-                        "A IA preparou uma alteração para o Meu Dia."
-                    },
-                    acao = json.optString(
-                        "acao",
-                        ""
-                    ),
-                    titulo = json.optString(
-                        "titulo",
-                        "Alteração do Meu Dia"
-                    )
+        print(
+            "Pergunta recebida:",
+            pergunta
+        )
+
+        if not pergunta:
+
+            return jsonify({
+                "erro": (
+                    "Nenhuma pergunta "
+                    "foi enviada."
                 )
+            }), 400
 
-                comandoPendente = comando
+        prompt = f"""
+Voce e a inteligencia artificial
+do aplicativo Meu Dia.
 
-                respostaAtual =
-                    "A IA preparou uma alteração. Autorize para continuar."
+Responda em portugues do Brasil.
 
-            } else {
+Seja clara, amigavel e objetiva.
 
-                respostaAtual =
-                    resposta.ifBlank {
-                        "O servidor não retornou uma resposta."
-                    }
-            }
+Nao use asteriscos duplos.
 
-        } catch (e: Exception) {
+Nao escreva textos desnecessarios.
 
-            respostaAtual =
-                "Recebi uma resposta do servidor, mas não consegui interpretá-la."
-        }
-    }
+Pergunta do usuario:
+{pergunta}
 
-    fun confirmarComandoDaIA() {
+Informacoes do Meu Dia:
+{contexto}
 
-        val comando = comandoPendente ?: return
+Use essas informacoes quando forem
+uteis para responder.
+"""
 
-        when (comando.acao) {
-
-            "CRIAR_ELEMENTO" -> {
-
-                /*
-                 * AQUI NÃO ALTERAMOS O BANCO AUTOMATICAMENTE AINDA.
-                 *
-                 * Primeiro vamos conectar esta parte ao seu Room
-                 * e ao modelo real do Meu Dia.
-                 *
-                 * Isso protege os dados que já funcionam no aplicativo.
-                 */
-            }
-
-            else -> {
-
-                /*
-                 * Ação ainda não implementada.
-                 *
-                 * A IA não poderá executar uma ação desconhecida.
-                 */
-            }
-        }
-
-        respostaAtual =
-            "A ação '${comando.titulo}' foi autorizada."
-
-        comandoPendente = null
-    }
-
-    fun rejeitarComandoDaIA() {
-
-        comandoPendente = null
-
-        respostaAtual =
-            "Operação cancelada por você."
-    }
-
-    private fun enviarPostParaRender(
-        pergunta: String,
-        contexto: String
-    ): String? {
-
-        var conexao: HttpURLConnection? = null
-
-        return try {
-
-            val url = URL(URL_SERVIDOR)
-
-            conexao =
-                (url.openConnection() as HttpURLConnection).apply {
-
-                    requestMethod = "POST"
-
-                    setRequestProperty(
-                        "Content-Type",
-                        "application/json; charset=utf-8"
-                    )
-
-                    setRequestProperty(
-                        "Accept",
-                        "application/json"
-                    )
-
-                    doOutput = true
-
-                    connectTimeout =
-                        TIMEOUT_CONEXAO
-
-                    readTimeout =
-                        TIMEOUT_LEITURA
-                }
-
-            val json = JSONObject().apply {
-
-                put(
-                    "pergunta",
-                    pergunta
-                )
-
-                put(
-                    "contexto",
-                    contexto
-                )
-            }
-
-            val corpo =
-                json.toString().toByteArray(Charsets.UTF_8)
-
-            conexao.outputStream.use { output ->
-
-                output.write(corpo)
-                output.flush()
-            }
-
-            val codigo =
-                conexao.responseCode
-
-            if (
-                codigo == HttpURLConnection.HTTP_OK
-            ) {
-
-                conexao.inputStream
-                    .bufferedReader()
-                    .use { leitor ->
-                        leitor.readText()
-                    }
-
-            } else {
-
-                val erroTexto = try {
-
-                    conexao.errorStream
-                        ?.bufferedReader()
-                        ?.use { leitor ->
-                            leitor.readText()
+        corpo = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
                         }
-
-                } catch (_: Exception) {
-
-                    null
+                    ]
                 }
-
-                if (!erroTexto.isNullOrBlank()) {
-
-                    erroTexto
-
-                } else {
-
-                    JSONObject()
-                        .put(
-                            "erro",
-                            "Servidor retornou HTTP $codigo."
-                        )
-                        .toString()
-                }
-            }
-
-        } catch (e: Exception) {
-
-            JSONObject()
-                .put(
-                    "erro",
-                    e.localizedMessage
-                        ?: "Erro de conexão."
-                )
-                .toString()
-
-        } finally {
-
-            conexao?.disconnect()
+            ]
         }
-    }
-}
 
-data class RespostaServidor(
-    val tipo: String = "RESPOSTA",
-    val resposta: String = "",
-    val acao: String = "",
-    val titulo: String = ""
-)
-```
+        dados_envio = json.dumps(
+            corpo
+        ).encode(
+            "utf-8"
+        )
+
+        resposta_texto = None
+        modelo_usado = None
+
+        # ==================================================
+        # TENTA TODOS OS MODELOS AUTOMATICAMENTE
+        # ==================================================
+
+        for modelo in MODELOS_GEMINI:
+
+            print("")
+            print(
+                "TENTANDO MODELO:",
+                modelo
+            )
+
+            resposta_texto = enviar_para_gemini(
+                modelo,
+                dados_envio
+            )
+
+            if resposta_texto:
+
+                try:
+
+                    texto = extrair_resposta(
+                        resposta_texto
+                    )
+
+                    if texto:
+
+                        # Remove ** caso o modelo envie.
+                        texto = texto.replace(
+                            "**",
+                            ""
+                        ).strip()
+
+                        modelo_usado = modelo
+
+                        print("")
+                        print(
+                            "========================================"
+                        )
+                        print(
+                            "RESPOSTA OBTIDA COM SUCESSO"
+                        )
+                        print(
+                            "MODELO USADO:",
+                            modelo_usado
+                        )
+                        print(
+                            "========================================"
+                        )
+
+                        return jsonify({
+                            "resposta": texto
+                        })
+
+                except Exception as erro:
+
+                    print(
+                        "Erro ao interpretar "
+                        "resposta do modelo:",
+                        str(erro)
+                    )
+
+            print(
+                "Mudando automaticamente para "
+                "o proximo modelo..."
+            )
+
+        # ==================================================
+        # TODOS OS MODELOS FALHARAM
+        # ==================================================
+
+        print("")
+        print(
+            "========================================"
+        )
+        print(
+            "TODOS OS MODELOS FALHARAM"
+        )
+        print(
+            "========================================"
+        )
+
+        return jsonify({
+            "erro": (
+                "O servico de inteligencia "
+                "artificial esta temporariamente "
+                "indisponivel. Tente novamente."
+            )
+        }), 503
+
+    except Exception as erro:
+
+        print("")
+        print(
+            "========================================"
+        )
+        print(
+            "ERRO INTERNO DO SERVIDOR"
+        )
+        print(
+            str(erro)
+        )
+        print(
+            "========================================"
+        )
+
+        return jsonify({
+            "erro": str(erro)
+        }), 500
+
+
+if __name__ == "__main__":
+
+    porta = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    print("")
+    print(
+        "========================================"
+    )
+    print(
+        "SERVIDOR MEU DIA INICIANDO"
+    )
+    print(
+        "PORTA:",
+        porta
+    )
+    print(
+        "MODELOS DISPONIVEIS:"
+    )
+
+    for modelo in MODELOS_GEMINI:
+        print(
+            "-",
+            modelo
+        )
+
+    print(
+        "GEMINI CONFIGURADO:",
+        bool(GEMINI_API_KEY)
+    )
+
+    print(
+        "========================================"
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=porta
+    )
