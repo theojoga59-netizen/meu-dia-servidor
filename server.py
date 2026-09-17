@@ -1,211 +1,93 @@
-from flask import Flask, jsonify, request
-import os
-import urllib.request
-import urllib.error
-import json
-import time
-import random
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.google.gson.Gson
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 
-app = Flask(__name__)
+class IaViewModel : ViewModel() {
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+    var respostaAtual by mutableStateOf("Olá! Como posso ajudar o seu dia hoje?")
+        private set
 
-# Modelos atualizados e estáveis da API do Gemini
-MODELOS_GEMINI = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-1.5-flash"
-]
+    var isLoading by mutableStateOf(false)
+        private set
 
-TENTATIVAS_POR_MODELO = 2
-ERROS_TEMPORARIOS = [408, 429, 500, 502, 503, 504]
+    // Estado para controlar o Dialog de Confirmação da IA
+    var comandoPendente by mutableStateOf<RespostaServidor?>(null)
+        private set
 
+    fun perguntarAoServidor(pergunta: String, contextoLocal: String) {
+        viewModelScope.launch {
+            isLoading = true
+            try {
+                val respostaJson = withContext(Dispatchers.IO) {
+                    enviarPostParaRender(pergunta, contextoLocal)
+                }
 
-@app.route("/")
-def inicio():
-    return jsonify({
-        "servidor": "Meu Dia",
-        "status": "online",
-        "mensagem": "Servidor funcionando corretamente!",
-        "gemini_configurado": bool(GEMINI_API_KEY)
-    })
+                if (respostaJson != null) {
+                    val gson = Gson()
+                    val resultado = gson.fromJson(respostaJson, RespostaServidor::class.java)
 
+                    if (resultado.tipo == "COMANDO") {
+                        // A IA quer fazer uma modificação estrutural. Pede sua autorização!
+                        comandoPendente = resultado
+                    } else {
+                        // Apenas texto normal
+                        respostaAtual = resultado.resposta ?: "Sem resposta da IA."
+                    }
+                } else {
+                    respostaAtual = "Erro ao conectar com o servidor no Render."
+                }
+            } catch (e: Exception) {
+                respostaAtual = "Erro: ${e.localizedMessage}"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
 
-@app.route("/status")
-def status():
-    return jsonify({
-        "servidor": "Meu Dia",
-        "status": "online",
-        "gemini_configurado": bool(GEMINI_API_KEY),
-        "modelos": MODELOS_GEMINI
-    })
+    fun confirmarComandoDaIA() {
+        val comando = comandoPendente ?: return
+        
+        // Executa a ação de forma segura sem mexer no que já está salvo no Room
+        when (comando.acao) {
+            "CRIAR_ELEMENTO" -> {
+                // Insira aqui a lógica local de salvamento (ex: chamar seu DAO do Room)
+            }
+        }
+        
+        respostaAtual = "Ação '${comando.titulo}' aplicada com sucesso!"
+        comandoPendente = null // Fecha o diálogo
+    }
 
+    fun rejeitarComandoDaIA() {
+        comandoPendente = null
+        respostaAtual = "Operação cancelada por você."
+    }
 
-def montar_url(modelo):
-    return (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + modelo
-        + ":generateContent?key="
-        + GEMINI_API_KEY
-    )
-
-
-def enviar_para_gemini(modelo, dados_envio):
-    url = montar_url(modelo)
-    ultimo_erro = None
-
-    for tentativa in range(1, TENTATIVAS_POR_MODELO + 1):
-        print("========================================")
-        print("MODELO:", modelo)
-        print("TENTATIVA:", tentativa, "DE", TENTATIVAS_POR_MODELO)
-        print("========================================")
-
-        requisicao = urllib.request.Request(
-            url,
-            data=dados_envio,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-
-        try:
-            with urllib.request.urlopen(requisicao, timeout=60) as resposta_http:
-                resposta_texto = resposta_http.read().decode("utf-8", errors="replace")
-                print("SUCESSO COM O MODELO:", modelo)
-                return resposta_texto
-
-        except urllib.error.HTTPError as erro:
-            ultimo_erro = erro
-            corpo_erro = erro.read().decode("utf-8", errors="replace")
-            print("========================================")
-            print("ERRO DO GOOGLE - CODIGO:", erro.code)
-            print("RESPOSTA:", corpo_erro)
-            print("========================================")
-
-            if erro.code not in ERROS_TEMPORARIOS:
-                raise erro
-
-            if tentativa < TENTATIVAS_POR_MODELO:
-                espera = (2 ** (tentativa - 1)) + random.uniform(0.5, 1.5)
-                time.sleep(espera)
-                continue
-            return None
-
-        except urllib.error.URLError as erro:
-            ultimo_erro = erro
-            if tentativa < TENTATIVAS_POR_MODELO:
-                espera = (2 ** (tentativa - 1)) + random.uniform(0.5, 1.5)
-                time.sleep(espera)
-                continue
-            return None
-
-        except Exception as erro:
-            ultimo_erro = erro
-            return None
-
-    return None
-
-
-def extrair_resposta(resposta_texto):
-    resposta_json = json.loads(resposta_texto)
-    candidatos = resposta_json.get("candidates", [])
-    if not candidatos:
-        return ""
-    conteudo = candidatos[0].get("content", {})
-    partes = conteudo.get("parts", [])
-    if not partes:
-        return ""
-    
-    textos = [parte.get("text", "") for parte in partes if parte.get("text", "")]
-    return "\n".join(textos).strip()
-
-
-@app.route("/perguntar", methods=["POST"])
-def perguntar():
-    print("\n========================================")
-    print("PEDIDO RECEBIDO EM /perguntar")
-    print("========================================")
-
-    if not GEMINI_API_KEY:
-        return jsonify({"erro": "A chave GEMINI_API_KEY não está configurada no servidor."}), 500
-
-    try:
-        dados = request.get_json(silent=True) or {}
-        pergunta = str(dados.get("pergunta", "")).strip()
-        contexto = str(dados.get("contexto", "")).strip()
-
-        if not pergunta:
-            return jsonify({"erro": "Nenhuma pergunta foi enviada."}), 400
-
-        # Prompt inteligente que permite resposta em texto OU comandos JSON estruturados
-        prompt = f"""
-Você é a inteligência artificial autônoma do aplicativo Meu Dia.
-Responda em português do Brasil. Seja clara, amigável e objetiva.
-
-Se o usuário pedir para criar uma nova função, alterar layout, atualizar dados estruturados ou adicionar uma nova ferramenta no app, você DEVE retornar APENAS um JSON válido estruturado neste formato exato (sem blocos de código markdown complexos):
-{{
-  "tipo": "COMANDO",
-  "acao": "CRIAR_ELEMENTO",
-  "titulo": "Nome da Ação",
-  "mensagem": "Explicação do que será alterado no app",
-  "payload": {{}}
-}}
-
-Se for apenas uma conversa comum ou dúvida, responda normalmente em texto puro, mas estruturado assim:
-{{
-  "tipo": "TEXTO",
-  "resposta": "Sua resposta aqui"
-}}
-
-Pergunta do usuário:
-{pergunta}
-
-Informações atuais do Meu Dia:
-{contexto}
-"""
-
-        corpo = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
+    private fun enviarPostParaRender(pergunta: String, contexto: String): String? {
+        val url = URL("https://SEU-APP-NO-RENDER.onrender.com/perguntar") // Substitua pela sua URL real do Render
+        val conexao = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            doOutput = true
+            connectTimeout = 30000
+            readTimeout = 30000
         }
 
-        dados_envio = json.dumps(corpo).encode("utf-8")
-        resposta_texto = None
-        modelo_usado = None
+        val jsonBody = """{"pergunta": "$pergunta", "contexto": "$contexto"}"""
+        conexao.outputStream.write(jsonBody.toByteArray(Charsets.UTF_8))
 
-        for modelo in MODELOS_GEMINI:
-            print(f"\nTENTANDO MODELO: {modelo}")
-            resposta_texto = enviar_para_gemini(modelo, dados_envio)
-
-            if resposta_texto:
-                try:
-                    texto_bruto = extrair_resposta(resposta_texto)
-                    if texto_bruto:
-                        modelo_usado = modelo
-                        
-                        # Tenta interpretar se a IA retornou um JSON de comando ou texto
-                        limpo = texto_bruto.replace("```json", "").replace("```", "").strip()
-                        try:
-                            json_obj = json.loads(limpo)
-                            return jsonify(json_obj)
-                        except:
-                            # Se não for JSON válido, encapsula como texto padrão
-                            return jsonify({
-                                "tipo": "TEXTO",
-                                "resposta": limpo.replace("**", "")
-                            })
-                except Exception as erro:
-                    print("Erro ao interpretar resposta:", str(erro))
-
-        return jsonify({
-            "erro": "O serviço de inteligência artificial está temporariamente indisponível. Tente novamente."
-        }), 503
-
-    except Exception as erro:
-        print("ERRO INTERNO:", str(erro))
-        return jsonify({"erro": str(erro)}), 500
-
-
-if __name__ == "__main__":
-    porta = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=porta)
+        return if (conexao.responseCode == HttpURLConnection.HTTP_OK) {
+            conexao.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            null
+        }
+    }
+}
