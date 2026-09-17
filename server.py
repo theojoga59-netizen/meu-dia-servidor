@@ -3,52 +3,33 @@ import urllib.request
 import urllib.error
 import json
 import os
+import time
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
-
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-MODELO_GEMINI = "gemini-3.8-flash"
+MODELOS_GEMINI = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash"
+]
 
-# ============================================================
-# FUNÇÕES
-# ============================================================
+MAX_TENTATIVAS_POR_MODELO = 2
+TEMPOS_ESPERA = [3, 7]
+
 
 def agora():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def chamar_gemini(pergunta, contexto=""):
-    """
-    Envia uma pergunta para o Gemini.
-    """
-
-    if not GEMINI_API_KEY:
-        return {
-            "ok": False,
-            "erro": "GEMINI_API_KEY não configurada no Render."
-        }
-
-    prompt = (
-        "Você é a inteligência artificial do aplicativo Meu Dia.\n"
-        "Responda sempre em português do Brasil.\n"
-        "Seja clara, útil e objetiva.\n\n"
-        "Contexto do aplicativo:\n"
-        + str(contexto)
-        + "\n\n"
-        "Pergunta do usuário:\n"
-        + str(pergunta)
-    )
-
+def fazer_requisicao_gemini(modelo, prompt):
     url = (
         "https://generativelanguage.googleapis.com/"
         "v1beta/models/"
-        + MODELO_GEMINI
+        + modelo
         + ":generateContent"
     )
 
@@ -77,7 +58,6 @@ def chamar_gemini(pergunta, contexto=""):
     )
 
     try:
-
         with urllib.request.urlopen(
             requisicao,
             timeout=60
@@ -95,7 +75,8 @@ def chamar_gemini(pergunta, contexto=""):
         if not candidatos:
             return {
                 "ok": False,
-                "erro": "O Gemini não retornou uma resposta."
+                "temporario": False,
+                "erro": "O Gemini não retornou candidatos."
             }
 
         partes = (
@@ -107,9 +88,7 @@ def chamar_gemini(pergunta, contexto=""):
         textos = []
 
         for parte in partes:
-
             if "text" in parte:
-
                 textos.append(
                     str(parte["text"])
                 )
@@ -119,27 +98,39 @@ def chamar_gemini(pergunta, contexto=""):
         ).strip()
 
         if not resposta_final:
-
             return {
                 "ok": False,
+                "temporario": False,
                 "erro": "O Gemini retornou uma resposta vazia."
             }
 
         return {
             "ok": True,
             "resposta": resposta_final,
-            "modelo": MODELO_GEMINI
+            "modelo": modelo
         }
 
     except urllib.error.HTTPError as erro:
 
         try:
-            detalhe = erro.read().decode("utf-8")
+            detalhe = erro.read().decode(
+                "utf-8"
+            )
         except Exception:
             detalhe = str(erro)
 
+        temporario = erro.code in [
+            429,
+            500,
+            502,
+            503,
+            504
+        ]
+
         return {
             "ok": False,
+            "temporario": temporario,
+            "codigo_http": erro.code,
             "erro": (
                 "Erro HTTP "
                 + str(erro.code)
@@ -152,23 +143,108 @@ def chamar_gemini(pergunta, contexto=""):
 
         return {
             "ok": False,
+            "temporario": True,
             "erro": (
                 "Erro de conexão com o Gemini: "
                 + str(erro)
             )
         }
 
+    except TimeoutError:
+
+        return {
+            "ok": False,
+            "temporario": True,
+            "erro": "Tempo limite de conexão com o Gemini."
+        }
+
     except Exception as erro:
 
         return {
             "ok": False,
+            "temporario": False,
             "erro": str(erro)
         }
 
 
-# ============================================================
-# ROTA PRINCIPAL
-# ============================================================
+def chamar_gemini(pergunta, contexto=""):
+
+    if not GEMINI_API_KEY:
+        return {
+            "ok": False,
+            "erro": (
+                "GEMINI_API_KEY não configurada "
+                "no Render."
+            )
+        }
+
+    prompt = (
+        "Você é a inteligência artificial "
+        "do aplicativo Meu Dia.\n"
+        "Responda sempre em português do Brasil.\n"
+        "Seja clara, útil e objetiva.\n\n"
+        "Contexto do aplicativo:\n"
+        + str(contexto)
+        + "\n\n"
+        "Pergunta do usuário:\n"
+        + str(pergunta)
+    )
+
+    erros = []
+
+    for modelo in MODELOS_GEMINI:
+
+        for tentativa in range(
+            MAX_TENTATIVAS_POR_MODELO
+        ):
+
+            resultado = fazer_requisicao_gemini(
+                modelo,
+                prompt
+            )
+
+            if resultado.get("ok"):
+                return resultado
+
+            erro = resultado.get(
+                "erro",
+                "Erro desconhecido."
+            )
+
+            erros.append(
+                modelo
+                + " -> "
+                + erro
+            )
+
+            if resultado.get("temporario"):
+
+                if tentativa < (
+                    MAX_TENTATIVAS_POR_MODELO - 1
+                ):
+
+                    tempo = TEMPOS_ESPERA[
+                        min(
+                            tentativa,
+                            len(TEMPOS_ESPERA) - 1
+                        )
+                    ]
+
+                    time.sleep(tempo)
+
+                    continue
+
+            break
+
+    return {
+        "ok": False,
+        "erro": (
+            "Não foi possível obter resposta "
+            "de nenhum modelo do Gemini.\n\n"
+            + "\n".join(erros)
+        )
+    }
+
 
 @app.route("/")
 def inicio():
@@ -176,16 +252,17 @@ def inicio():
     return jsonify({
         "servidor": "Meu Dia",
         "status": "online",
-        "mensagem": "Servidor funcionando corretamente!",
-        "gemini_configurado": bool(GEMINI_API_KEY),
+        "mensagem": (
+            "Servidor funcionando corretamente!"
+        ),
+        "gemini_configurado": bool(
+            GEMINI_API_KEY
+        ),
         "ia_desenvolvedora": True,
+        "modelos": MODELOS_GEMINI,
         "hora": agora()
     })
 
-
-# ============================================================
-# STATUS
-# ============================================================
 
 @app.route("/status")
 def status():
@@ -193,15 +270,14 @@ def status():
     return jsonify({
         "servidor": "Meu Dia",
         "status": "online",
-        "gemini_configurado": bool(GEMINI_API_KEY),
+        "gemini_configurado": bool(
+            GEMINI_API_KEY
+        ),
         "ia_desenvolvedora": True,
+        "modelos": MODELOS_GEMINI,
         "hora": agora()
     })
 
-
-# ============================================================
-# SAÚDE
-# ============================================================
 
 @app.route("/saude")
 def saude():
@@ -210,15 +286,14 @@ def saude():
         "ok": True,
         "servidor": "Meu Dia",
         "status": "online",
-        "gemini_configurado": bool(GEMINI_API_KEY),
-        "modelo": MODELO_GEMINI,
+        "gemini_configurado": bool(
+            GEMINI_API_KEY
+        ),
+        "ia_desenvolvedora": True,
+        "modelos": MODELOS_GEMINI,
         "hora": agora()
     })
 
-
-# ============================================================
-# PERGUNTAR PARA A IA
-# ============================================================
 
 @app.route(
     "/perguntar",
@@ -250,7 +325,9 @@ def perguntar():
 
             return jsonify({
                 "ok": False,
-                "resposta": "Digite uma pergunta."
+                "resposta": (
+                    "Digite uma pergunta."
+                )
             }), 400
 
         resultado = chamar_gemini(
@@ -263,21 +340,22 @@ def perguntar():
             return jsonify({
                 "ok": False,
                 "resposta": (
-                    "Não consegui falar com a IA. "
-                    + resultado.get(
-                        "erro",
-                        ""
-                    )
+                    "Não consegui falar "
+                    "com a IA agora."
                 ),
                 "erro": resultado.get(
                     "erro"
                 )
-            }), 500
+            }), 503
 
         return jsonify({
             "ok": True,
-            "resposta": resultado["resposta"],
-            "modelo": resultado["modelo"]
+            "resposta": resultado[
+                "resposta"
+            ],
+            "modelo": resultado[
+                "modelo"
+            ]
         })
 
     except Exception as erro:
@@ -288,10 +366,6 @@ def perguntar():
             "erro": str(erro)
         }), 500
 
-
-# ============================================================
-# IA DESENVOLVEDORA
-# ============================================================
 
 @app.route("/desenvolvedora")
 def desenvolvedora():
@@ -304,8 +378,10 @@ def desenvolvedora():
 
 <meta charset="UTF-8">
 
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
 <title>IA Desenvolvedora - Meu Dia</title>
 
@@ -331,16 +407,30 @@ body {
     border-radius: 12px;
 }
 
+h1,
+h2 {
+    margin-top: 0;
+}
+
 input,
 textarea {
+
     width: 100%;
+
     box-sizing: border-box;
+
     background: #0b0b0b;
+
     color: white;
+
     border: 1px solid #444;
+
     border-radius: 8px;
+
     padding: 12px;
+
     margin-top: 8px;
+
     margin-bottom: 15px;
 }
 
@@ -349,11 +439,17 @@ textarea {
 }
 
 button {
+
     padding: 12px 18px;
+
     border: 0;
+
     border-radius: 8px;
+
     cursor: pointer;
+
     font-weight: bold;
+
     margin: 4px;
 }
 
@@ -368,16 +464,26 @@ button {
 }
 
 pre {
+
     background: #050505;
+
     padding: 15px;
+
     border-radius: 8px;
+
     white-space: pre-wrap;
+
     word-break: break-word;
+
+    overflow-x: auto;
 }
 
 #status {
+
     padding: 12px;
+
     background: #292929;
+
     border-radius: 8px;
 }
 
@@ -389,7 +495,9 @@ pre {
 
 <div class="container">
 
-<h1>🤖 IA Desenvolvedora — Meu Dia</h1>
+<h1>
+🤖 IA Desenvolvedora — Meu Dia
+</h1>
 
 <div class="card">
 
@@ -401,45 +509,54 @@ Verificando servidor...
 
 <div class="card">
 
-<label>Nome do arquivo</label>
+<label>
+Nome do arquivo
+</label>
 
 <input
     id="arquivo"
-    value="MainActivity.kt">
+    value="MainActivity.kt"
+>
 
-<label>Código do arquivo</label>
+<label>
+Código do arquivo
+</label>
 
 <textarea
     id="codigo"
-    placeholder="Cole aqui o código completo..."></textarea>
+    placeholder="Cole aqui o código completo..."
+></textarea>
 
-<label>O que a IA deve fazer?</label>
+<label>
+O que a IA deve fazer?
+</label>
 
 <textarea
     id="instrucoes"
-    placeholder="Exemplo: encontre os erros e gere o arquivo completo corrigido."></textarea>
+    placeholder="Exemplo: encontre os erros e gere o arquivo completo corrigido."
+></textarea>
 
 <button
     class="analisar"
-    onclick="analisar()">
-
+    onclick="analisar()"
+>
 🔎 Analisar código
-
 </button>
 
 <button
     class="gerar"
-    onclick="gerar()">
-
+    onclick="gerar()"
+>
 🛠️ Gerar código corrigido
-
 </button>
 
 </div>
 
 <div class="card">
 
-<h2>Análise</h2>
+<h2>
+Análise
+</h2>
 
 <pre id="resultado">
 Nenhuma análise ainda.
@@ -449,7 +566,9 @@ Nenhuma análise ainda.
 
 <div class="card">
 
-<h2>Código gerado</h2>
+<h2>
+Código gerado
+</h2>
 
 <pre id="codigoGerado">
 Nenhum código gerado ainda.
@@ -459,15 +578,15 @@ Nenhum código gerado ainda.
 
 </div>
 
-
 <script>
 
 async function verificar() {
 
     try {
 
-        const resposta =
-            await fetch("/saude");
+        const resposta = await fetch(
+            "/saude"
+        );
 
         const dados =
             await resposta.json();
@@ -475,10 +594,12 @@ async function verificar() {
         document.getElementById(
             "status"
         ).textContent =
-            "Servidor: " +
-            dados.status +
-            " | Gemini configurado: " +
-            dados.gemini_configurado;
+            "Servidor: "
+            + dados.status
+            + " | Gemini configurado: "
+            + dados.gemini_configurado
+            + " | Modelos disponíveis: "
+            + dados.modelos.join(", ");
 
     } catch (erro) {
 
@@ -544,16 +665,17 @@ async function analisar() {
         document.getElementById(
             "resultado"
         ).textContent =
-            dados.analise ||
-            dados.erro ||
-            "Nenhuma resposta.";
+            dados.analise
+            || dados.erro
+            || "Nenhuma resposta.";
 
     } catch (erro) {
 
         document.getElementById(
             "resultado"
         ).textContent =
-            "Erro: " + erro;
+            "Erro: "
+            + erro;
 
     }
 
@@ -618,16 +740,17 @@ async function gerar() {
         document.getElementById(
             "codigoGerado"
         ).textContent =
-            dados.codigo ||
-            dados.erro ||
-            "Nenhum código foi gerado.";
+            dados.codigo
+            || dados.erro
+            || "Nenhum código foi gerado.";
 
     } catch (erro) {
 
         document.getElementById(
             "codigoGerado"
         ).textContent =
-            "Erro: " + erro;
+            "Erro: "
+            + erro;
 
     }
 
@@ -643,10 +766,6 @@ verificar();
 </html>
 """
 
-
-# ============================================================
-# ANALISAR CÓDIGO
-# ============================================================
 
 @app.route(
     "/desenvolvedora/analisar",
@@ -678,26 +797,38 @@ def analisar_codigo():
 
             return jsonify({
                 "ok": False,
-                "erro": "Código não enviado."
+                "erro": (
+                    "Código não enviado."
+                )
             }), 400
 
         prompt = (
-            "Você é a IA Desenvolvedora do aplicativo Meu Dia.\n\n"
+            "Você é a IA Desenvolvedora "
+            "do aplicativo Meu Dia.\n\n"
+
             "Analise o código abaixo procurando:\n"
+
             "- erros de sintaxe\n"
             "- erros de lógica\n"
             "- problemas de compilação\n"
             "- problemas de imports\n"
             "- problemas de estrutura\n"
-            "- problemas que possam causar crash\n\n"
+            "- problemas que possam causar crash\n"
+            "- problemas de compatibilidade\n"
+            "- problemas de segurança\n\n"
+
             "Arquivo: "
             + arquivo
             + "\n\n"
+
             "Código:\n"
             + codigo
             + "\n\n"
+
             "Explique os problemas de forma clara "
-            "em português do Brasil."
+            "em português do Brasil.\n"
+
+            "Se houver erro, explique como corrigir."
         )
 
         resultado = chamar_gemini(
@@ -711,12 +842,16 @@ def analisar_codigo():
                 "erro": resultado.get(
                     "erro"
                 )
-            }), 500
+            }), 503
 
         return jsonify({
             "ok": True,
-            "analise": resultado["resposta"],
-            "modelo": resultado["modelo"]
+            "analise": resultado[
+                "resposta"
+            ],
+            "modelo": resultado[
+                "modelo"
+            ]
         })
 
     except Exception as erro:
@@ -726,10 +861,6 @@ def analisar_codigo():
             "erro": str(erro)
         }), 500
 
-
-# ============================================================
-# GERAR CÓDIGO
-# ============================================================
 
 @app.route(
     "/desenvolvedora/gerar",
@@ -768,142 +899,36 @@ def gerar_codigo():
 
             return jsonify({
                 "ok": False,
-                "erro": "Código não enviado."
+                "erro": (
+                    "Código não enviado."
+                )
             }), 400
 
         prompt = (
-            "Você é a IA Desenvolvedora do aplicativo Meu Dia.\n\n"
+            "Você é a IA Desenvolvedora "
+            "do aplicativo Meu Dia.\n\n"
 
-            "Sua tarefa é corrigir o arquivo Android abaixo.\n\n"
+            "Sua tarefa é corrigir o arquivo "
+            "Android abaixo.\n\n"
 
-            "IMPORTANTE:\n"
-            "O usuário vai substituir o arquivo inteiro.\n"
-            "Portanto devolva o arquivo COMPLETO corrigido.\n"
-            "Nunca devolva apenas um trecho.\n\n"
+            "REGRAS IMPORTANTES:\n"
 
-            "Arquivo:\n"
-            + arquivo
-            + "\n\n"
+            "1. O usuário vai substituir "
+            "o arquivo inteiro.\n"
 
-            "Código atual:\n"
-            + codigo
-            + "\n\n"
+            "2. Devolva o arquivo COMPLETO "
+            "corrigido.\n"
 
-            "Instruções:\n"
-            + instrucoes
-            + "\n\n"
+            "3. Nunca devolva somente um trecho.\n"
 
-            "Retorne somente o código completo."
-        )
+            "4. Preserve as partes que já "
+            "estão funcionando.\n"
 
-        resultado = chamar_gemini(
-            prompt
-        )
+            "5. Corrija erros de sintaxe, "
+            "imports, lógica e estrutura.\n"
 
-        if not resultado.get("ok"):
+            "6. Não invente arquivos que não "
+            "foram solicitados.\n"
 
-            return jsonify({
-                "ok": False,
-                "erro": resultado.get(
-                    "erro"
-                )
-            }), 500
-
-        codigo_gerado = resultado[
-            "resposta"
-        ]
-
-        if "```" in codigo_gerado:
-
-            partes = codigo_gerado.split(
-                "```"
-            )
-
-            if len(partes) >= 3:
-
-                codigo_gerado = partes[1]
-
-                linhas = codigo_gerado.splitlines()
-
-                if linhas:
-
-                    primeira = (
-                        linhas[0]
-                        .strip()
-                        .lower()
-                    )
-
-                    if primeira in [
-                        "kotlin",
-                        "java",
-                        "xml",
-                        "python",
-                        "json",
-                        "gradle",
-                        "javascript",
-                        "js",
-                        "html",
-                        "css",
-                        "text",
-                        "txt"
-                    ]:
-
-                        codigo_gerado = "\n".join(
-                            linhas[1:]
-                        )
-
-        return jsonify({
-            "ok": True,
-            "arquivo": arquivo,
-            "codigo": codigo_gerado.strip(),
-            "modelo": resultado["modelo"]
-        })
-
-    except Exception as erro:
-
-        return jsonify({
-            "ok": False,
-            "erro": str(erro)
-        }), 500
-
-
-# ============================================================
-# ERROS
-# ============================================================
-
-@app.errorhandler(404)
-def erro_404(erro):
-
-    return jsonify({
-        "ok": False,
-        "erro": "Rota não encontrada."
-    }), 404
-
-
-@app.errorhandler(500)
-def erro_500(erro):
-
-    return jsonify({
-        "ok": False,
-        "erro": "Erro interno do servidor."
-    }), 500
-
-
-# ============================================================
-# EXECUÇÃO LOCAL
-# ============================================================
-
-if __name__ == "__main__":
-
-    porta = int(
-        os.environ.get(
-            "PORT",
-            "5000"
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=porta
-    )
+            "7. Retorne somente o conteúdo "
 
