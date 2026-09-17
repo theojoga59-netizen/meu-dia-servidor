@@ -1,305 +1,419 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
+import os
 import urllib.request
 import urllib.error
 import json
-import os
 import time
+import random
+import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+# ============================================================
+# CONFIGURACAO
+# ============================================================
 
-MODELOS_GEMINI = [
-    "gemini-3.8-flash",
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+SERVIDOR_NOME = "Meu Dia"
+
+# Modelo principal atual.
+# O Google documenta o Gemini 3.8 Flash como modelo estavel
+# e voltado tambem para engenharia de software e agentes.
+MODELO_RAPIDO = "gemini-3.8-flash"
+
+MODELOS_FALLBACK = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash"
+    "gemini-3.5-flash-lite"
 ]
 
-MAX_TENTATIVAS_POR_MODELO = 2
-TEMPOS_ESPERA = [3, 7]
+# Para o assistente normal queremos velocidade.
+NIVEL_PENSAMENTO_NORMAL = "low"
 
+# Para a IA desenvolvedora queremos mais raciocinio.
+NIVEL_PENSAMENTO_DESENVOLVEDORA = "medium"
+
+# Tempo menor para evitar que o aplicativo fique preso
+# esperando por muito tempo.
+TIMEOUT_NORMAL = 30
+
+# Para tarefas de desenvolvimento podemos esperar mais.
+TIMEOUT_DESENVOLVEDORA = 90
+
+# Apenas uma nova tentativa por modelo.
+# Isso evita aquela espera enorme do sistema anterior.
+TENTATIVAS_POR_MODELO = 1
+
+ERROS_TEMPORARIOS = [
+    408,
+    429,
+    500,
+    502,
+    503,
+    504
+]
+
+# ============================================================
+# ESTADO DA IA DESENVOLVEDORA
+# ============================================================
+
+ESTADO_DESENVOLVEDORA = {
+    "status": "pronta",
+    "job_id": None,
+    "ultima_acao": None,
+    "ultima_atualizacao": None,
+    "mensagem": "IA Desenvolvedora pronta.",
+    "autorizacao": False,
+    "testes": None,
+    "resultado": None
+}
+
+
+# ============================================================
+# FUNCOES BASICAS
+# ============================================================
 
 def agora():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.utcnow().isoformat() + "Z"
 
 
-def fazer_requisicao_gemini(modelo, prompt):
-    url = (
-        "https://generativelanguage.googleapis.com/"
-        "v1beta/models/"
+def montar_url(modelo):
+    return (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
         + modelo
-        + ":generateContent"
+        + ":generateContent?key="
+        + GEMINI_API_KEY
     )
 
-    dados = {
+
+def montar_corpo_gemini(
+    texto,
+    nivel_pensamento="low"
+):
+    return {
         "contents": [
             {
                 "parts": [
                     {
-                        "text": prompt
+                        "text": texto
                     }
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "thinkingConfig": {
+                "thinkingLevel": nivel_pensamento
+            }
+        }
     }
 
-    corpo = json.dumps(dados).encode("utf-8")
 
-    requisicao = urllib.request.Request(
-        url,
-        data=corpo,
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY
-        },
-        method="POST"
+def extrair_resposta(resposta_texto):
+    resposta_json = json.loads(resposta_texto)
+
+    candidatos = resposta_json.get(
+        "candidates",
+        []
     )
 
-    try:
-        with urllib.request.urlopen(
-            requisicao,
-            timeout=60
-        ) as resposta:
+    if not candidatos:
+        return ""
 
-            texto = resposta.read().decode("utf-8")
+    conteudo = candidatos[0].get(
+        "content",
+        {}
+    )
 
-            dados_resposta = json.loads(texto)
+    partes = conteudo.get(
+        "parts",
+        []
+    )
 
-        candidatos = dados_resposta.get(
-            "candidates",
-            []
+    if not partes:
+        return ""
+
+    textos = []
+
+    for parte in partes:
+        texto = parte.get(
+            "text",
+            ""
         )
 
-        if not candidatos:
-            return {
-                "ok": False,
-                "temporario": False,
-                "erro": "O Gemini não retornou candidatos."
-            }
+        if texto:
+            textos.append(texto)
 
-        partes = (
-            candidatos[0]
-            .get("content", {})
-            .get("parts", [])
+    return "\n".join(textos).strip()
+
+
+# ============================================================
+# ENVIO PARA GEMINI
+# ============================================================
+
+def enviar_para_gemini(
+    modelo,
+    dados_envio,
+    timeout
+):
+    url = montar_url(modelo)
+
+    for tentativa in range(
+        1,
+        TENTATIVAS_POR_MODELO + 1
+    ):
+
+        print("")
+        print("========================================")
+        print("GEMINI")
+        print("MODELO:", modelo)
+        print("TENTATIVA:", tentativa)
+        print("TIMEOUT:", timeout)
+        print("========================================")
+
+        requisicao = urllib.request.Request(
+            url,
+            data=dados_envio,
+            headers={
+                "Content-Type": "application/json"
+            },
+            method="POST"
         )
-
-        textos = []
-
-        for parte in partes:
-            if "text" in parte:
-                textos.append(
-                    str(parte["text"])
-                )
-
-        resposta_final = "\n".join(
-            textos
-        ).strip()
-
-        if not resposta_final:
-            return {
-                "ok": False,
-                "temporario": False,
-                "erro": "O Gemini retornou uma resposta vazia."
-            }
-
-        return {
-            "ok": True,
-            "resposta": resposta_final,
-            "modelo": modelo
-        }
-
-    except urllib.error.HTTPError as erro:
 
         try:
-            detalhe = erro.read().decode(
-                "utf-8"
+
+            inicio = time.time()
+
+            with urllib.request.urlopen(
+                requisicao,
+                timeout=timeout
+            ) as resposta_http:
+
+                resposta_texto = (
+                    resposta_http
+                    .read()
+                    .decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+                )
+
+            duracao = round(
+                time.time() - inicio,
+                2
             )
-        except Exception:
-            detalhe = str(erro)
 
-        temporario = erro.code in [
-            429,
-            500,
-            502,
-            503,
-            504
-        ]
-
-        return {
-            "ok": False,
-            "temporario": temporario,
-            "codigo_http": erro.code,
-            "erro": (
-                "Erro HTTP "
-                + str(erro.code)
-                + ": "
-                + detalhe
+            print(
+                "Gemini respondeu em:",
+                duracao,
+                "segundos."
             )
-        }
 
-    except urllib.error.URLError as erro:
+            return resposta_texto
 
-        return {
-            "ok": False,
-            "temporario": True,
-            "erro": (
-                "Erro de conexão com o Gemini: "
-                + str(erro)
+        except urllib.error.HTTPError as erro:
+
+            corpo_erro = erro.read().decode(
+                "utf-8",
+                errors="replace"
             )
-        }
 
-    except TimeoutError:
+            print("")
+            print("ERRO GOOGLE")
+            print("MODELO:", modelo)
+            print("CODIGO:", erro.code)
+            print("RESPOSTA:", corpo_erro)
 
-        return {
-            "ok": False,
-            "temporario": True,
-            "erro": "Tempo limite de conexão com o Gemini."
-        }
+            if erro.code not in ERROS_TEMPORARIOS:
+                return None
 
-    except Exception as erro:
+            return None
 
-        return {
-            "ok": False,
-            "temporario": False,
-            "erro": str(erro)
-        }
+        except urllib.error.URLError as erro:
+
+            print("")
+            print("ERRO DE CONEXAO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+
+            return None
+
+        except Exception as erro:
+
+            print("")
+            print("ERRO DESCONHECIDO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+
+            return None
+
+    return None
 
 
-def chamar_gemini(pergunta, contexto=""):
+# ============================================================
+# CHAMADA NORMAL
+# ============================================================
 
-    if not GEMINI_API_KEY:
-        return {
-            "ok": False,
-            "erro": (
-                "GEMINI_API_KEY não configurada "
-                "no Render."
-            )
-        }
+def chamar_gemini_normal(prompt):
 
-    prompt = (
-        "Você é a inteligência artificial "
-        "do aplicativo Meu Dia.\n"
-        "Responda sempre em português do Brasil.\n"
-        "Seja clara, útil e objetiva.\n\n"
-        "Contexto do aplicativo:\n"
-        + str(contexto)
-        + "\n\n"
-        "Pergunta do usuário:\n"
-        + str(pergunta)
+    corpo = montar_corpo_gemini(
+        prompt,
+        NIVEL_PENSAMENTO_NORMAL
     )
 
-    erros = []
+    dados_envio = json.dumps(
+        corpo
+    ).encode("utf-8")
 
-    for modelo in MODELOS_GEMINI:
+    modelos = [
+        MODELO_RAPIDO
+    ] + MODELOS_FALLBACK
 
-        for tentativa in range(
-            MAX_TENTATIVAS_POR_MODELO
-        ):
+    for modelo in modelos:
 
-            resultado = fazer_requisicao_gemini(
-                modelo,
-                prompt
-            )
-
-            if resultado.get("ok"):
-                return resultado
-
-            erro = resultado.get(
-                "erro",
-                "Erro desconhecido."
-            )
-
-            erros.append(
-                modelo
-                + " -> "
-                + erro
-            )
-
-            if resultado.get("temporario"):
-
-                if tentativa < (
-                    MAX_TENTATIVAS_POR_MODELO - 1
-                ):
-
-                    tempo = TEMPOS_ESPERA[
-                        min(
-                            tentativa,
-                            len(TEMPOS_ESPERA) - 1
-                        )
-                    ]
-
-                    time.sleep(tempo)
-
-                    continue
-
-            break
-
-    return {
-        "ok": False,
-        "erro": (
-            "Não foi possível obter resposta "
-            "de nenhum modelo do Gemini.\n\n"
-            + "\n".join(erros)
+        resposta_texto = enviar_para_gemini(
+            modelo,
+            dados_envio,
+            TIMEOUT_NORMAL
         )
-    }
 
+        if not resposta_texto:
+            continue
+
+        try:
+
+            texto = extrair_resposta(
+                resposta_texto
+            )
+
+            if texto:
+                return texto.replace(
+                    "**",
+                    ""
+                ).strip()
+
+        except Exception as erro:
+
+            print(
+                "Erro interpretando resposta:",
+                str(erro)
+            )
+
+    return None
+
+
+# ============================================================
+# CHAMADA DA IA DESENVOLVEDORA
+# ============================================================
+
+def chamar_gemini_desenvolvedora(prompt):
+
+    corpo = montar_corpo_gemini(
+        prompt,
+        NIVEL_PENSAMENTO_DESENVOLVEDORA
+    )
+
+    dados_envio = json.dumps(
+        corpo
+    ).encode("utf-8")
+
+    # Primeiro tenta o modelo mais forte da arquitetura.
+    modelos = [
+        MODELO_RAPIDO,
+        "gemini-3.7-flash",
+        "gemini-3.6-flash"
+    ]
+
+    for modelo in modelos:
+
+        resposta_texto = enviar_para_gemini(
+            modelo,
+            dados_envio,
+            TIMEOUT_DESENVOLVEDORA
+        )
+
+        if not resposta_texto:
+            continue
+
+        try:
+
+            texto = extrair_resposta(
+                resposta_texto
+            )
+
+            if texto:
+                return texto.strip()
+
+        except Exception as erro:
+
+            print(
+                "Erro interpretando IA desenvolvedora:",
+                str(erro)
+            )
+
+    return None
+
+
+# ============================================================
+# ROTA PRINCIPAL
+# ============================================================
 
 @app.route("/")
 def inicio():
 
     return jsonify({
-        "servidor": "Meu Dia",
+        "servidor": SERVIDOR_NOME,
         "status": "online",
-        "mensagem": (
-            "Servidor funcionando corretamente!"
-        ),
+        "mensagem": "Servidor funcionando corretamente!",
         "gemini_configurado": bool(
             GEMINI_API_KEY
         ),
-        "ia_desenvolvedora": True,
-        "modelos": MODELOS_GEMINI,
-        "hora": agora()
+        "ia_desenvolvedora": "ativa"
     })
 
+
+# ============================================================
+# STATUS
+# ============================================================
 
 @app.route("/status")
 def status():
 
     return jsonify({
-        "servidor": "Meu Dia",
+        "servidor": SERVIDOR_NOME,
         "status": "online",
         "gemini_configurado": bool(
             GEMINI_API_KEY
         ),
-        "ia_desenvolvedora": True,
-        "modelos": MODELOS_GEMINI,
-        "hora": agora()
+        "modelo_rapido": MODELO_RAPIDO,
+        "modelos_fallback": MODELOS_FALLBACK,
+        "ia_desenvolvedora": ESTADO_DESENVOLVEDORA
     })
 
 
-@app.route("/saude")
-def saude():
-
-    return jsonify({
-        "ok": True,
-        "servidor": "Meu Dia",
-        "status": "online",
-        "gemini_configurado": bool(
-            GEMINI_API_KEY
-        ),
-        "ia_desenvolvedora": True,
-        "modelos": MODELOS_GEMINI,
-        "hora": agora()
-    })
-
+# ============================================================
+# ASSISTENTE NORMAL DO MEU DIA
+# ============================================================
 
 @app.route(
     "/perguntar",
     methods=["POST"]
 )
 def perguntar():
+
+    print("")
+    print("========================================")
+    print("PEDIDO RECEBIDO EM /perguntar")
+    print("========================================")
+
+    if not GEMINI_API_KEY:
+
+        return jsonify({
+            "erro":
+                "A chave GEMINI_API_KEY "
+                "nao esta configurada no servidor."
+        }), 500
 
     try:
 
@@ -324,467 +438,106 @@ def perguntar():
         if not pergunta:
 
             return jsonify({
-                "ok": False,
-                "resposta": (
-                    "Digite uma pergunta."
-                )
+                "erro":
+                    "Nenhuma pergunta foi enviada."
             }), 400
 
-        resultado = chamar_gemini(
-            pergunta,
-            contexto
+        prompt = f"""
+Voce e a inteligencia artificial
+do aplicativo Meu Dia.
+
+Responda em portugues do Brasil.
+
+Seja clara, amigavel e objetiva.
+
+Responda rapidamente.
+
+Nao use asteriscos duplos.
+
+Nao escreva textos desnecessarios.
+
+Pergunta do usuario:
+{pergunta}
+
+Informacoes atuais do aplicativo Meu Dia:
+{contexto}
+
+Use essas informacoes quando forem
+uteis para responder.
+
+Se nao houver informacao suficiente,
+diga claramente o que esta faltando.
+"""
+
+        resposta = chamar_gemini_normal(
+            prompt
         )
 
-        if not resultado.get("ok"):
+        if resposta:
 
             return jsonify({
-                "ok": False,
-                "resposta": (
-                    "Não consegui falar "
-                    "com a IA agora."
-                ),
-                "erro": resultado.get(
-                    "erro"
-                )
-            }), 503
+                "resposta": resposta,
+                "modelo": MODELO_RAPIDO
+            })
 
         return jsonify({
-            "ok": True,
-            "resposta": resultado[
-                "resposta"
-            ],
-            "modelo": resultado[
-                "modelo"
-            ]
-        })
+            "erro":
+                "A inteligencia artificial "
+                "esta temporariamente indisponivel. "
+                "Tente novamente."
+        }), 503
 
     except Exception as erro:
 
+        print(
+            "ERRO /perguntar:",
+            str(erro)
+        )
+
         return jsonify({
-            "ok": False,
-            "resposta": "Erro no servidor.",
             "erro": str(erro)
         }), 500
 
 
-@app.route("/desenvolvedora")
-def desenvolvedora():
-
-    return """
-<!DOCTYPE html>
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
-
-<title>IA Desenvolvedora - Meu Dia</title>
-
-<style>
-
-body {
-    background: #101010;
-    color: white;
-    font-family: Arial, sans-serif;
-    margin: 0;
-    padding: 20px;
-}
-
-.container {
-    max-width: 1000px;
-    margin: auto;
-}
-
-.card {
-    background: #1d1d1d;
-    padding: 20px;
-    margin-bottom: 20px;
-    border-radius: 12px;
-}
-
-h1,
-h2 {
-    margin-top: 0;
-}
-
-input,
-textarea {
-
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background: #0b0b0b;
-
-    color: white;
-
-    border: 1px solid #444;
-
-    border-radius: 8px;
-
-    padding: 12px;
-
-    margin-top: 8px;
-
-    margin-bottom: 15px;
-}
-
-textarea {
-    min-height: 250px;
-}
-
-button {
-
-    padding: 12px 18px;
-
-    border: 0;
-
-    border-radius: 8px;
-
-    cursor: pointer;
-
-    font-weight: bold;
-
-    margin: 4px;
-}
-
-.analisar {
-    background: #2196f3;
-    color: white;
-}
-
-.gerar {
-    background: #4caf50;
-    color: white;
-}
-
-pre {
-
-    background: #050505;
-
-    padding: 15px;
-
-    border-radius: 8px;
-
-    white-space: pre-wrap;
-
-    word-break: break-word;
-
-    overflow-x: auto;
-}
-
-#status {
-
-    padding: 12px;
-
-    background: #292929;
-
-    border-radius: 8px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>
-🤖 IA Desenvolvedora — Meu Dia
-</h1>
-
-<div class="card">
-
-<div id="status">
-Verificando servidor...
-</div>
-
-</div>
-
-<div class="card">
-
-<label>
-Nome do arquivo
-</label>
-
-<input
-    id="arquivo"
-    value="MainActivity.kt"
->
-
-<label>
-Código do arquivo
-</label>
-
-<textarea
-    id="codigo"
-    placeholder="Cole aqui o código completo..."
-></textarea>
-
-<label>
-O que a IA deve fazer?
-</label>
-
-<textarea
-    id="instrucoes"
-    placeholder="Exemplo: encontre os erros e gere o arquivo completo corrigido."
-></textarea>
-
-<button
-    class="analisar"
-    onclick="analisar()"
->
-🔎 Analisar código
-</button>
-
-<button
-    class="gerar"
-    onclick="gerar()"
->
-🛠️ Gerar código corrigido
-</button>
-
-</div>
-
-<div class="card">
-
-<h2>
-Análise
-</h2>
-
-<pre id="resultado">
-Nenhuma análise ainda.
-</pre>
-
-</div>
-
-<div class="card">
-
-<h2>
-Código gerado
-</h2>
-
-<pre id="codigoGerado">
-Nenhum código gerado ainda.
-</pre>
-
-</div>
-
-</div>
-
-<script>
-
-async function verificar() {
-
-    try {
-
-        const resposta = await fetch(
-            "/saude"
-        );
-
-        const dados =
-            await resposta.json();
-
-        document.getElementById(
-            "status"
-        ).textContent =
-            "Servidor: "
-            + dados.status
-            + " | Gemini configurado: "
-            + dados.gemini_configurado
-            + " | Modelos disponíveis: "
-            + dados.modelos.join(", ");
-
-    } catch (erro) {
-
-        document.getElementById(
-            "status"
-        ).textContent =
-            "Erro ao conectar ao servidor.";
-
-    }
-
-}
-
-
-async function analisar() {
-
-    const arquivo =
-        document.getElementById(
-            "arquivo"
-        ).value;
-
-    const codigo =
-        document.getElementById(
-            "codigo"
-        ).value;
-
-    if (!codigo.trim()) {
-
-        alert(
-            "Cole o código primeiro."
-        );
-
-        return;
-    }
-
-    document.getElementById(
-        "resultado"
-    ).textContent =
-        "Analisando...";
-
-    try {
-
-        const resposta =
-            await fetch(
-                "/desenvolvedora/analisar",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-                        arquivo: arquivo,
-                        codigo: codigo
-                    })
-                }
-            );
-
-        const dados =
-            await resposta.json();
-
-        document.getElementById(
-            "resultado"
-        ).textContent =
-            dados.analise
-            || dados.erro
-            || "Nenhuma resposta.";
-
-    } catch (erro) {
-
-        document.getElementById(
-            "resultado"
-        ).textContent =
-            "Erro: "
-            + erro;
-
-    }
-
-}
-
-
-async function gerar() {
-
-    const arquivo =
-        document.getElementById(
-            "arquivo"
-        ).value;
-
-    const codigo =
-        document.getElementById(
-            "codigo"
-        ).value;
-
-    const instrucoes =
-        document.getElementById(
-            "instrucoes"
-        ).value;
-
-    if (!codigo.trim()) {
-
-        alert(
-            "Cole o código primeiro."
-        );
-
-        return;
-    }
-
-    document.getElementById(
-        "codigoGerado"
-    ).textContent =
-        "Gerando código...";
-
-    try {
-
-        const resposta =
-            await fetch(
-                "/desenvolvedora/gerar",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-                        arquivo: arquivo,
-                        codigo: codigo,
-                        instrucoes: instrucoes
-                    })
-                }
-            );
-
-        const dados =
-            await resposta.json();
-
-        document.getElementById(
-            "codigoGerado"
-        ).textContent =
-            dados.codigo
-            || dados.erro
-            || "Nenhum código foi gerado.";
-
-    } catch (erro) {
-
-        document.getElementById(
-            "codigoGerado"
-        ).textContent =
-            "Erro: "
-            + erro;
-
-    }
-
-}
-
-
-verificar();
-
-</script>
-
-</body>
-
-</html>
-"""
-
+# ============================================================
+# IA DESENVOLVEDORA - STATUS
+# ============================================================
+
+@app.route(
+    "/desenvolvedora/status",
+    methods=["GET"]
+)
+def desenvolvedora_status():
+
+    return jsonify({
+        "servidor": SERVIDOR_NOME,
+        "ia_desenvolvedora": True,
+        "estado": ESTADO_DESENVOLVEDORA
+    })
+
+
+# ============================================================
+# IA DESENVOLVEDORA - ANALISAR
+# ============================================================
 
 @app.route(
     "/desenvolvedora/analisar",
     methods=["POST"]
 )
-def analisar_codigo():
+def desenvolvedora_analisar():
+
+    if not GEMINI_API_KEY:
+
+        return jsonify({
+            "erro":
+                "GEMINI_API_KEY nao configurada."
+        }), 500
 
     try:
 
         dados = request.get_json(
             silent=True
         ) or {}
-
-        arquivo = str(
-            dados.get(
-                "arquivo",
-                "arquivo.txt"
-            )
-        )
 
         codigo = str(
             dados.get(
@@ -793,80 +546,145 @@ def analisar_codigo():
             )
         )
 
+        nome_arquivo = str(
+            dados.get(
+                "arquivo",
+                "arquivo_desconhecido"
+            )
+        )
+
         if not codigo.strip():
 
             return jsonify({
-                "ok": False,
-                "erro": (
-                    "Código não enviado."
-                )
+                "erro":
+                    "Nenhum codigo foi enviado."
             }), 400
 
-        prompt = (
-            "Você é a IA Desenvolvedora "
-            "do aplicativo Meu Dia.\n\n"
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "analisando"
 
-            "Analise o código abaixo procurando:\n"
+        ESTADO_DESENVOLVEDORA[
+            "ultima_acao"
+        ] = "analisar"
 
-            "- erros de sintaxe\n"
-            "- erros de lógica\n"
-            "- problemas de compilação\n"
-            "- problemas de imports\n"
-            "- problemas de estrutura\n"
-            "- problemas que possam causar crash\n"
-            "- problemas de compatibilidade\n"
-            "- problemas de segurança\n\n"
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
 
-            "Arquivo: "
-            + arquivo
-            + "\n\n"
+        prompt = f"""
+Voce e a IA Desenvolvedora do aplicativo
+Meu Dia.
 
-            "Código:\n"
-            + codigo
-            + "\n\n"
+Sua funcao e analisar codigo de software
+com muita cautela.
 
-            "Explique os problemas de forma clara "
-            "em português do Brasil.\n"
+Nao altere nada.
 
-            "Se houver erro, explique como corrigir."
-        )
+Nao invente arquivos.
 
-        resultado = chamar_gemini(
+Nao invente funcoes que nao aparecem
+no codigo fornecido.
+
+Analise:
+
+1. erros provaveis
+2. riscos
+3. problemas de arquitetura
+4. oportunidades de melhoria
+5. problemas de desempenho
+6. problemas de seguranca
+7. melhorias para o aplicativo Meu Dia
+
+Arquivo analisado:
+{nome_arquivo}
+
+CODIGO:
+--------------------
+{codigo}
+--------------------
+
+Responda em portugues do Brasil.
+
+Organize a resposta em:
+
+ERROS
+RISCOS
+MELHORIAS
+PLANO
+
+Se nao tiver certeza de alguma coisa,
+marque como "precisa ser verificado".
+"""
+
+        resultado = chamar_gemini_desenvolvedora(
             prompt
         )
 
-        if not resultado.get("ok"):
+        if not resultado:
+
+            ESTADO_DESENVOLVEDORA[
+                "status"
+            ] = "erro"
+
+            ESTADO_DESENVOLVEDORA[
+                "mensagem"
+            ] = "Nao foi possivel analisar o codigo."
 
             return jsonify({
-                "ok": False,
-                "erro": resultado.get(
-                    "erro"
-                )
+                "erro":
+                    "A IA desenvolvedora nao conseguiu analisar o codigo."
             }), 503
 
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "analise_concluida"
+
+        ESTADO_DESENVOLVEDORA[
+            "mensagem"
+        ] = "Analise concluida."
+
+        ESTADO_DESENVOLVEDORA[
+            "resultado"
+        ] = resultado
+
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
+
         return jsonify({
-            "ok": True,
-            "analise": resultado[
-                "resposta"
-            ],
-            "modelo": resultado[
-                "modelo"
-            ]
+            "status": "analise_concluida",
+            "arquivo": nome_arquivo,
+            "analise": resultado
         })
 
     except Exception as erro:
 
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "erro"
+
         return jsonify({
-            "ok": False,
             "erro": str(erro)
         }), 500
 
+
+# ============================================================
+# IA DESENVOLVEDORA - GERAR ALTERACAO
+# ============================================================
 
 @app.route(
     "/desenvolvedora/gerar",
     methods=["POST"]
 )
-def gerar_codigo():
+def desenvolvedora_gerar():
+
+    if not GEMINI_API_KEY:
+
+        return jsonify({
+            "erro":
+                "GEMINI_API_KEY nao configurada."
+        }), 500
 
     try:
 
@@ -874,61 +692,373 @@ def gerar_codigo():
             silent=True
         ) or {}
 
-        arquivo = str(
+        pedido = str(
+            dados.get(
+                "pedido",
+                ""
+            )
+        ).strip()
+
+        codigo_atual = str(
+            dados.get(
+                "codigo_atual",
+                ""
+            )
+        )
+
+        nome_arquivo = str(
             dados.get(
                 "arquivo",
-                "arquivo.txt"
+                "arquivo.kt"
             )
         )
 
-        codigo = str(
-            dados.get(
-                "codigo",
-                ""
-            )
-        )
-
-        instrucoes = str(
-            dados.get(
-                "instrucoes",
-                ""
-            )
-        )
-
-        if not codigo.strip():
+        if not pedido:
 
             return jsonify({
-                "ok": False,
-                "erro": (
-                    "Código não enviado."
-                )
+                "erro":
+                    "Nenhum pedido de alteracao foi enviado."
             }), 400
 
-        prompt = (
-            "Você é a IA Desenvolvedora "
-            "do aplicativo Meu Dia.\n\n"
+        if not codigo_atual.strip():
 
-            "Sua tarefa é corrigir o arquivo "
-            "Android abaixo.\n\n"
+            return jsonify({
+                "erro":
+                    "O codigo atual nao foi enviado."
+            }), 400
 
-            "REGRAS IMPORTANTES:\n"
+        job_id = str(
+            uuid.uuid4()
+        )
 
-            "1. O usuário vai substituir "
-            "o arquivo inteiro.\n"
+        ESTADO_DESENVOLVEDORA[
+            "job_id"
+        ] = job_id
 
-            "2. Devolva o arquivo COMPLETO "
-            "corrigido.\n"
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "gerando"
 
-            "3. Nunca devolva somente um trecho.\n"
+        ESTADO_DESENVOLVEDORA[
+            "ultima_acao"
+        ] = "gerar"
 
-            "4. Preserve as partes que já "
-            "estão funcionando.\n"
+        ESTADO_DESENVOLVEDORA[
+            "autorizacao"
+        ] = False
 
-            "5. Corrija erros de sintaxe, "
-            "imports, lógica e estrutura.\n"
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
 
-            "6. Não invente arquivos que não "
-            "foram solicitados.\n"
+        prompt = f"""
+Voce e a IA Desenvolvedora do aplicativo
+Meu Dia.
 
-            "7. Retorne somente o conteúdo "
+Tarefa:
+{pedido}
 
+Arquivo:
+{nome_arquivo}
+
+IMPORTANTE:
+
+Nao destrua funcionalidades existentes.
+
+Preserve o comportamento que ja funciona.
+
+Nao remova recursos sem necessidade.
+
+Analise o codigo antes de propor a mudanca.
+
+Crie uma nova versao completa do arquivo.
+
+A resposta deve conter:
+
+1. RESUMO DA ALTERACAO
+2. RISCOS
+3. CODIGO_COMPLETO
+
+O codigo em CODIGO_COMPLETO deve ser
+o arquivo inteiro, pronto para substituir
+o arquivo atual.
+
+Nao coloque comentarios fora da estrutura
+solicitada.
+
+CODIGO ATUAL:
+========================
+{codigo_atual}
+========================
+"""
+
+        resultado = chamar_gemini_desenvolvedora(
+            prompt
+        )
+
+        if not resultado:
+
+            ESTADO_DESENVOLVEDORA[
+                "status"
+            ] = "erro"
+
+            return jsonify({
+                "erro":
+                    "A IA nao conseguiu gerar a alteracao."
+            }), 503
+
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "aguardando_autorizacao"
+
+        ESTADO_DESENVOLVEDORA[
+            "autorizacao"
+        ] = False
+
+        ESTADO_DESENVOLVEDORA[
+            "resultado"
+        ] = resultado
+
+        ESTADO_DESENVOLVEDORA[
+            "mensagem"
+        ] = (
+            "Alteracao preparada. "
+            "Aguardando autorizacao do usuario."
+        )
+
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
+
+        return jsonify({
+            "status":
+                "aguardando_autorizacao",
+            "job_id":
+                job_id,
+            "arquivo":
+                nome_arquivo,
+            "resultado":
+                resultado,
+            "mensagem":
+                "A alteracao foi preparada, "
+                "mas ainda nao foi aplicada."
+        })
+
+    except Exception as erro:
+
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "erro"
+
+        return jsonify({
+            "erro": str(erro)
+        }), 500
+
+
+# ============================================================
+# AUTORIZAR ALTERACAO
+# ============================================================
+
+@app.route(
+    "/desenvolvedora/autorizar",
+    methods=["POST"]
+)
+def desenvolvedora_autorizar():
+
+    try:
+
+        dados = request.get_json(
+            silent=True
+        ) or {}
+
+        job_id = str(
+            dados.get(
+                "job_id",
+                ""
+            )
+        ).strip()
+
+        if not job_id:
+
+            return jsonify({
+                "erro":
+                    "job_id nao informado."
+            }), 400
+
+        if job_id != ESTADO_DESENVOLVEDORA[
+            "job_id"
+        ]:
+
+            return jsonify({
+                "erro":
+                    "job_id invalido."
+            }), 400
+
+        if ESTADO_DESENVOLVEDORA[
+            "status"
+        ] != "aguardando_autorizacao":
+
+            return jsonify({
+                "erro":
+                    "Nao existe alteracao aguardando autorizacao."
+            }), 409
+
+        ESTADO_DESENVOLVEDORA[
+            "autorizacao"
+        ] = True
+
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "autorizado"
+
+        ESTADO_DESENVOLVEDORA[
+            "mensagem"
+        ] = (
+            "Alteracao autorizada pelo usuario. "
+            "A aplicacao real sera feita quando "
+            "o laboratorio do projeto estiver conectado."
+        )
+
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
+
+        return jsonify({
+            "status":
+                "autorizado",
+            "job_id":
+                job_id,
+            "mensagem":
+                ESTADO_DESENVOLVEDORA[
+                    "mensagem"
+                ]
+        })
+
+    except Exception as erro:
+
+        return jsonify({
+            "erro": str(erro)
+        }), 500
+
+
+# ============================================================
+# REJEITAR ALTERACAO
+# ============================================================
+
+@app.route(
+    "/desenvolvedora/rejeitar",
+    methods=["POST"]
+)
+def desenvolvedora_rejeitar():
+
+    try:
+
+        dados = request.get_json(
+            silent=True
+        ) or {}
+
+        job_id = str(
+            dados.get(
+                "job_id",
+                ""
+            )
+        ).strip()
+
+        if job_id != ESTADO_DESENVOLVEDORA[
+            "job_id"
+        ]:
+
+            return jsonify({
+                "erro":
+                    "job_id invalido."
+            }), 400
+
+        ESTADO_DESENVOLVEDORA[
+            "autorizacao"
+        ] = False
+
+        ESTADO_DESENVOLVEDORA[
+            "status"
+        ] = "rejeitado"
+
+        ESTADO_DESENVOLVEDORA[
+            "mensagem"
+        ] = "Alteracao rejeitada pelo usuario."
+
+        ESTADO_DESENVOLVEDORA[
+            "ultima_atualizacao"
+        ] = agora()
+
+        return jsonify({
+            "status":
+                "rejeitado",
+            "job_id":
+                job_id,
+            "mensagem":
+                "Alteracao descartada."
+        })
+
+    except Exception as erro:
+
+        return jsonify({
+            "erro": str(erro)
+        }), 500
+
+
+# ============================================================
+# ROTA DE SAUDE
+# ============================================================
+
+@app.route(
+    "/saude",
+    methods=["GET"]
+)
+def saude():
+
+    return jsonify({
+        "servidor": SERVIDOR_NOME,
+        "online": True,
+        "gemini": bool(
+            GEMINI_API_KEY
+        ),
+        "ia_desenvolvedora": True,
+        "hora": agora()
+    })
+
+
+# ============================================================
+# INICIO DO SERVIDOR
+# ============================================================
+
+if __name__ == "__main__":
+
+    porta = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    print("")
+    print("========================================")
+    print("SERVIDOR MEU DIA")
+    print("========================================")
+    print("PORTA:", porta)
+    print(
+        "GEMINI CONFIGURADO:",
+        bool(GEMINI_API_KEY)
+    )
+    print(
+        "MODELO RAPIDO:",
+        MODELO_RAPIDO
+    )
+    print(
+        "IA DESENVOLVEDORA: ATIVA"
+    )
+    print("========================================")
+    print("")
+
+    app.run(
+        host="0.0.0.0",
+        port=porta
+    )
