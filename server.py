@@ -10,28 +10,15 @@ app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Modelos em ordem de tentativa.
-# Se um estiver temporariamente indisponivel,
-# o servidor tenta automaticamente o proximo.
+# Modelos atualizados e estáveis da API do Gemini
 MODELOS_GEMINI = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite"
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-1.5-flash"
 ]
 
-# Quantas tentativas serao feitas para cada modelo.
 TENTATIVAS_POR_MODELO = 2
-
-# Erros que normalmente indicam problema temporario.
-ERROS_TEMPORARIOS = [
-    408,
-    429,
-    500,
-    502,
-    503,
-    504
-]
+ERROS_TEMPORARIOS = [408, 429, 500, 502, 503, 504]
 
 
 @app.route("/")
@@ -64,442 +51,161 @@ def montar_url(modelo):
 
 
 def enviar_para_gemini(modelo, dados_envio):
-
     url = montar_url(modelo)
-
     ultimo_erro = None
 
-    for tentativa in range(
-        1,
-        TENTATIVAS_POR_MODELO + 1
-    ):
-
+    for tentativa in range(1, TENTATIVAS_POR_MODELO + 1):
         print("========================================")
         print("MODELO:", modelo)
-        print(
-            "TENTATIVA:",
-            tentativa,
-            "DE",
-            TENTATIVAS_POR_MODELO
-        )
+        print("TENTATIVA:", tentativa, "DE", TENTATIVAS_POR_MODELO)
         print("========================================")
 
         requisicao = urllib.request.Request(
             url,
             data=dados_envio,
-            headers={
-                "Content-Type": "application/json"
-            },
+            headers={"Content-Type": "application/json"},
             method="POST"
         )
 
         try:
-
-            with urllib.request.urlopen(
-                requisicao,
-                timeout=60
-            ) as resposta_http:
-
-                resposta_texto = resposta_http.read().decode(
-                    "utf-8",
-                    errors="replace"
-                )
-
+            with urllib.request.urlopen(requisicao, timeout=60) as resposta_http:
+                resposta_texto = resposta_http.read().decode("utf-8", errors="replace")
                 print("SUCESSO COM O MODELO:", modelo)
-
                 return resposta_texto
 
         except urllib.error.HTTPError as erro:
-
             ultimo_erro = erro
-
-            corpo_erro = erro.read().decode(
-                "utf-8",
-                errors="replace"
-            )
-
+            corpo_erro = erro.read().decode("utf-8", errors="replace")
             print("========================================")
-            print("ERRO DO GOOGLE")
-            print("MODELO:", modelo)
-            print("CODIGO:", erro.code)
+            print("ERRO DO GOOGLE - CODIGO:", erro.code)
             print("RESPOSTA:", corpo_erro)
             print("========================================")
 
-            # Se nao for um erro temporario,
-            # nao adianta ficar repetindo.
             if erro.code not in ERROS_TEMPORARIOS:
                 raise erro
 
-            # Se ainda houver outra tentativa neste modelo,
-            # espera um pouco e tenta novamente.
             if tentativa < TENTATIVAS_POR_MODELO:
-
-                espera = (
-                    (2 ** (tentativa - 1))
-                    + random.uniform(0.5, 1.5)
-                )
-
-                print(
-                    "Erro temporario.",
-                    "Nova tentativa em",
-                    round(espera, 1),
-                    "segundos."
-                )
-
+                espera = (2 ** (tentativa - 1)) + random.uniform(0.5, 1.5)
                 time.sleep(espera)
-
                 continue
-
-            # Acabaram as tentativas deste modelo.
-            print(
-                "MODELO",
-                modelo,
-                "NAO RESPONDEU."
-            )
-
             return None
 
         except urllib.error.URLError as erro:
-
             ultimo_erro = erro
-
-            print("========================================")
-            print("ERRO DE CONEXAO")
-            print("MODELO:", modelo)
-            print("ERRO:", str(erro))
-            print("========================================")
-
             if tentativa < TENTATIVAS_POR_MODELO:
-
-                espera = (
-                    (2 ** (tentativa - 1))
-                    + random.uniform(0.5, 1.5)
-                )
-
-                print(
-                    "Tentando novamente em",
-                    round(espera, 1),
-                    "segundos."
-                )
-
+                espera = (2 ** (tentativa - 1)) + random.uniform(0.5, 1.5)
                 time.sleep(espera)
-
                 continue
-
             return None
 
         except Exception as erro:
-
             ultimo_erro = erro
-
-            print("========================================")
-            print("ERRO DESCONHECIDO")
-            print("MODELO:", modelo)
-            print("ERRO:", str(erro))
-            print("========================================")
-
             return None
 
     return None
 
 
 def extrair_resposta(resposta_texto):
-
-    resposta_json = json.loads(
-        resposta_texto
-    )
-
-    candidatos = resposta_json.get(
-        "candidates",
-        []
-    )
-
+    resposta_json = json.loads(resposta_texto)
+    candidatos = resposta_json.get("candidates", [])
     if not candidatos:
         return ""
-
-    conteudo = candidatos[0].get(
-        "content",
-        {}
-    )
-
-    partes = conteudo.get(
-        "parts",
-        []
-    )
-
+    conteudo = candidatos[0].get("content", {})
+    partes = conteudo.get("parts", [])
     if not partes:
         return ""
-
-    textos = []
-
-    for parte in partes:
-
-        texto_parte = parte.get(
-            "text",
-            ""
-        )
-
-        if texto_parte:
-            textos.append(
-                texto_parte
-            )
-
-    texto = "\n".join(
-        textos
-    ).strip()
-
-    return texto
+    
+    textos = [parte.get("text", "") for parte in partes if parte.get("text", "")]
+    return "\n".join(textos).strip()
 
 
 @app.route("/perguntar", methods=["POST"])
 def perguntar():
-
-    print("")
-    print("========================================")
+    print("\n========================================")
     print("PEDIDO RECEBIDO EM /perguntar")
     print("========================================")
 
     if not GEMINI_API_KEY:
-
-        print(
-            "ERRO: GEMINI_API_KEY nao configurada."
-        )
-
-        return jsonify({
-            "erro": (
-                "A chave GEMINI_API_KEY "
-                "nao esta configurada no servidor."
-            )
-        }), 500
+        return jsonify({"erro": "A chave GEMINI_API_KEY não está configurada no servidor."}), 500
 
     try:
-
-        dados = request.get_json(
-            silent=True
-        ) or {}
-
-        pergunta = str(
-            dados.get(
-                "pergunta",
-                ""
-            )
-        ).strip()
-
-        contexto = str(
-            dados.get(
-                "contexto",
-                ""
-            )
-        ).strip()
-
-        print(
-            "Pergunta recebida:",
-            pergunta
-        )
+        dados = request.get_json(silent=True) or {}
+        pergunta = str(dados.get("pergunta", "")).strip()
+        contexto = str(dados.get("contexto", "")).strip()
 
         if not pergunta:
+            return jsonify({"erro": "Nenhuma pergunta foi enviada."}), 400
 
-            return jsonify({
-                "erro": (
-                    "Nenhuma pergunta "
-                    "foi enviada."
-                )
-            }), 400
-
+        # Prompt inteligente que permite resposta em texto OU comandos JSON estruturados
         prompt = f"""
-Voce e a inteligencia artificial
-do aplicativo Meu Dia.
+Você é a inteligência artificial autônoma do aplicativo Meu Dia.
+Responda em português do Brasil. Seja clara, amigável e objetiva.
 
-Responda em portugues do Brasil.
+Se o usuário pedir para criar uma nova função, alterar layout, atualizar dados estruturados ou adicionar uma nova ferramenta no app, você DEVE retornar APENAS um JSON válido estruturado neste formato exato (sem blocos de código markdown complexos):
+{{
+  "tipo": "COMANDO",
+  "acao": "CRIAR_ELEMENTO",
+  "titulo": "Nome da Ação",
+  "mensagem": "Explicação do que será alterado no app",
+  "payload": {{}}
+}}
 
-Seja clara, amigavel e objetiva.
+Se for apenas uma conversa comum ou dúvida, responda normalmente em texto puro, mas estruturado assim:
+{{
+  "tipo": "TEXTO",
+  "resposta": "Sua resposta aqui"
+}}
 
-Nao use asteriscos duplos.
-
-Nao escreva textos desnecessarios.
-
-Pergunta do usuario:
+Pergunta do usuário:
 {pergunta}
 
-Informacoes do Meu Dia:
+Informações atuais do Meu Dia:
 {contexto}
-
-Use essas informacoes quando forem
-uteis para responder.
 """
 
         corpo = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
         }
 
-        dados_envio = json.dumps(
-            corpo
-        ).encode(
-            "utf-8"
-        )
-
+        dados_envio = json.dumps(corpo).encode("utf-8")
         resposta_texto = None
         modelo_usado = None
 
-        # ==================================================
-        # TENTA TODOS OS MODELOS AUTOMATICAMENTE
-        # ==================================================
-
         for modelo in MODELOS_GEMINI:
-
-            print("")
-            print(
-                "TENTANDO MODELO:",
-                modelo
-            )
-
-            resposta_texto = enviar_para_gemini(
-                modelo,
-                dados_envio
-            )
+            print(f"\nTENTANDO MODELO: {modelo}")
+            resposta_texto = enviar_para_gemini(modelo, dados_envio)
 
             if resposta_texto:
-
                 try:
-
-                    texto = extrair_resposta(
-                        resposta_texto
-                    )
-
-                    if texto:
-
-                        # Remove ** caso o modelo envie.
-                        texto = texto.replace(
-                            "**",
-                            ""
-                        ).strip()
-
+                    texto_bruto = extrair_resposta(resposta_texto)
+                    if texto_bruto:
                         modelo_usado = modelo
-
-                        print("")
-                        print(
-                            "========================================"
-                        )
-                        print(
-                            "RESPOSTA OBTIDA COM SUCESSO"
-                        )
-                        print(
-                            "MODELO USADO:",
-                            modelo_usado
-                        )
-                        print(
-                            "========================================"
-                        )
-
-                        return jsonify({
-                            "resposta": texto
-                        })
-
+                        
+                        # Tenta interpretar se a IA retornou um JSON de comando ou texto
+                        limpo = texto_bruto.replace("```json", "").replace("```", "").strip()
+                        try:
+                            json_obj = json.loads(limpo)
+                            return jsonify(json_obj)
+                        except:
+                            # Se não for JSON válido, encapsula como texto padrão
+                            return jsonify({
+                                "tipo": "TEXTO",
+                                "resposta": limpo.replace("**", "")
+                            })
                 except Exception as erro:
-
-                    print(
-                        "Erro ao interpretar "
-                        "resposta do modelo:",
-                        str(erro)
-                    )
-
-            print(
-                "Mudando automaticamente para "
-                "o proximo modelo..."
-            )
-
-        # ==================================================
-        # TODOS OS MODELOS FALHARAM
-        # ==================================================
-
-        print("")
-        print(
-            "========================================"
-        )
-        print(
-            "TODOS OS MODELOS FALHARAM"
-        )
-        print(
-            "========================================"
-        )
+                    print("Erro ao interpretar resposta:", str(erro))
 
         return jsonify({
-            "erro": (
-                "O servico de inteligencia "
-                "artificial esta temporariamente "
-                "indisponivel. Tente novamente."
-            )
+            "erro": "O serviço de inteligência artificial está temporariamente indisponível. Tente novamente."
         }), 503
 
     except Exception as erro:
-
-        print("")
-        print(
-            "========================================"
-        )
-        print(
-            "ERRO INTERNO DO SERVIDOR"
-        )
-        print(
-            str(erro)
-        )
-        print(
-            "========================================"
-        )
-
-        return jsonify({
-            "erro": str(erro)
-        }), 500
+        print("ERRO INTERNO:", str(erro))
+        return jsonify({"erro": str(erro)}), 500
 
 
 if __name__ == "__main__":
-
-    porta = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
-    print("")
-    print(
-        "========================================"
-    )
-    print(
-        "SERVIDOR MEU DIA INICIANDO"
-    )
-    print(
-        "PORTA:",
-        porta
-    )
-    print(
-        "MODELOS DISPONIVEIS:"
-    )
-
-    for modelo in MODELOS_GEMINI:
-        print(
-            "-",
-            modelo
-        )
-
-    print(
-        "GEMINI CONFIGURADO:",
-        bool(GEMINI_API_KEY)
-    )
-
-    print(
-        "========================================"
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=porta
-    )
+    porta = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=porta)
