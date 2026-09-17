@@ -10,6 +10,29 @@ app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# Modelos em ordem de tentativa.
+# Se um estiver temporariamente indisponivel,
+# o servidor tenta automaticamente o proximo.
+MODELOS_GEMINI = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite"
+]
+
+# Quantas tentativas serao feitas para cada modelo.
+TENTATIVAS_POR_MODELO = 2
+
+# Erros que normalmente indicam problema temporario.
+ERROS_TEMPORARIOS = [
+    408,
+    429,
+    500,
+    502,
+    503,
+    504
+]
+
 
 @app.route("/")
 def inicio():
@@ -26,18 +49,40 @@ def status():
     return jsonify({
         "servidor": "Meu Dia",
         "status": "online",
-        "gemini_configurado": bool(GEMINI_API_KEY)
+        "gemini_configurado": bool(GEMINI_API_KEY),
+        "modelos": MODELOS_GEMINI
     })
 
 
-def chamar_gemini(url, dados_envio):
-    max_tentativas = 4
+def montar_url(modelo):
+    return (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + modelo
+        + ":generateContent?key="
+        + GEMINI_API_KEY
+    )
 
-    for tentativa in range(1, max_tentativas + 1):
 
-        print("----------------------------------------")
-        print("TENTATIVA GEMINI:", tentativa)
-        print("----------------------------------------")
+def enviar_para_gemini(modelo, dados_envio):
+
+    url = montar_url(modelo)
+
+    ultimo_erro = None
+
+    for tentativa in range(
+        1,
+        TENTATIVAS_POR_MODELO + 1
+    ):
+
+        print("========================================")
+        print("MODELO:", modelo)
+        print(
+            "TENTATIVA:",
+            tentativa,
+            "DE",
+            TENTATIVAS_POR_MODELO
+        )
+        print("========================================")
 
         requisicao = urllib.request.Request(
             url,
@@ -60,12 +105,13 @@ def chamar_gemini(url, dados_envio):
                     errors="replace"
                 )
 
-                print("RESPOSTA DO GOOGLE:")
-                print(resposta_texto)
+                print("SUCESSO COM O MODELO:", modelo)
 
                 return resposta_texto
 
         except urllib.error.HTTPError as erro:
+
+            ultimo_erro = erro
 
             corpo_erro = erro.read().decode(
                 "utf-8",
@@ -74,79 +120,163 @@ def chamar_gemini(url, dados_envio):
 
             print("========================================")
             print("ERRO DO GOOGLE")
+            print("MODELO:", modelo)
             print("CODIGO:", erro.code)
             print("RESPOSTA:", corpo_erro)
             print("========================================")
 
-            # Erros temporarios que podem ser tentados novamente
-            if erro.code in [408, 429, 500, 502, 503, 504]:
+            # Se nao for um erro temporario,
+            # nao adianta ficar repetindo.
+            if erro.code not in ERROS_TEMPORARIOS:
+                raise erro
 
-                if tentativa < max_tentativas:
+            # Se ainda houver outra tentativa neste modelo,
+            # espera um pouco e tenta novamente.
+            if tentativa < TENTATIVAS_POR_MODELO:
 
-                    tempo_espera = (2 ** (tentativa - 1)) + random.uniform(
-                        0,
-                        1
-                    )
+                espera = (
+                    (2 ** (tentativa - 1))
+                    + random.uniform(0.5, 1.5)
+                )
 
-                    print(
-                        "Erro temporario.",
-                        "Tentando novamente em",
-                        round(tempo_espera, 1),
-                        "segundos..."
-                    )
+                print(
+                    "Erro temporario.",
+                    "Nova tentativa em",
+                    round(espera, 1),
+                    "segundos."
+                )
 
-                    time.sleep(tempo_espera)
+                time.sleep(espera)
 
-                    continue
+                continue
 
-            raise erro
+            # Acabaram as tentativas deste modelo.
+            print(
+                "MODELO",
+                modelo,
+                "NAO RESPONDEU."
+            )
+
+            return None
 
         except urllib.error.URLError as erro:
 
-            print("ERRO DE CONEXAO:")
-            print(str(erro))
+            ultimo_erro = erro
 
-            if tentativa < max_tentativas:
+            print("========================================")
+            print("ERRO DE CONEXAO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+            print("========================================")
 
-                tempo_espera = (2 ** (tentativa - 1)) + random.uniform(
-                    0,
-                    1
+            if tentativa < TENTATIVAS_POR_MODELO:
+
+                espera = (
+                    (2 ** (tentativa - 1))
+                    + random.uniform(0.5, 1.5)
                 )
 
                 print(
                     "Tentando novamente em",
-                    round(tempo_espera, 1),
-                    "segundos..."
+                    round(espera, 1),
+                    "segundos."
                 )
 
-                time.sleep(tempo_espera)
+                time.sleep(espera)
 
                 continue
 
-            raise erro
+            return None
 
-    raise Exception(
-        "Nao foi possivel acessar o Gemini depois de varias tentativas."
+        except Exception as erro:
+
+            ultimo_erro = erro
+
+            print("========================================")
+            print("ERRO DESCONHECIDO")
+            print("MODELO:", modelo)
+            print("ERRO:", str(erro))
+            print("========================================")
+
+            return None
+
+    return None
+
+
+def extrair_resposta(resposta_texto):
+
+    resposta_json = json.loads(
+        resposta_texto
     )
+
+    candidatos = resposta_json.get(
+        "candidates",
+        []
+    )
+
+    if not candidatos:
+        return ""
+
+    conteudo = candidatos[0].get(
+        "content",
+        {}
+    )
+
+    partes = conteudo.get(
+        "parts",
+        []
+    )
+
+    if not partes:
+        return ""
+
+    textos = []
+
+    for parte in partes:
+
+        texto_parte = parte.get(
+            "text",
+            ""
+        )
+
+        if texto_parte:
+            textos.append(
+                texto_parte
+            )
+
+    texto = "\n".join(
+        textos
+    ).strip()
+
+    return texto
 
 
 @app.route("/perguntar", methods=["POST"])
 def perguntar():
 
+    print("")
     print("========================================")
     print("PEDIDO RECEBIDO EM /perguntar")
     print("========================================")
 
     if not GEMINI_API_KEY:
-        print("ERRO: GEMINI_API_KEY nao configurada.")
+
+        print(
+            "ERRO: GEMINI_API_KEY nao configurada."
+        )
 
         return jsonify({
-            "erro": "A chave GEMINI_API_KEY nao esta configurada no servidor."
+            "erro": (
+                "A chave GEMINI_API_KEY "
+                "nao esta configurada no servidor."
+            )
         }), 500
 
     try:
 
-        dados = request.get_json(silent=True) or {}
+        dados = request.get_json(
+            silent=True
+        ) or {}
 
         pergunta = str(
             dados.get(
@@ -162,21 +292,31 @@ def perguntar():
             )
         ).strip()
 
-        print("Pergunta recebida:", pergunta)
+        print(
+            "Pergunta recebida:",
+            pergunta
+        )
 
         if not pergunta:
+
             return jsonify({
-                "erro": "Nenhuma pergunta foi enviada."
+                "erro": (
+                    "Nenhuma pergunta "
+                    "foi enviada."
+                )
             }), 400
 
         prompt = f"""
-Voce e a inteligencia artificial do aplicativo Meu Dia.
+Voce e a inteligencia artificial
+do aplicativo Meu Dia.
 
-Responda em portugues do Brasil, de forma clara, amigavel e objetiva.
+Responda em portugues do Brasil.
 
-Evite usar formatacao Markdown desnecessaria.
+Seja clara, amigavel e objetiva.
 
-Nao use asteriscos duplos para destacar palavras.
+Nao use asteriscos duplos.
+
+Nao escreva textos desnecessarios.
 
 Pergunta do usuario:
 {pergunta}
@@ -184,17 +324,9 @@ Pergunta do usuario:
 Informacoes do Meu Dia:
 {contexto}
 
-Use essas informacoes quando forem uteis para responder.
+Use essas informacoes quando forem
+uteis para responder.
 """
-
-        modelo = "gemini-3.6-flash"
-
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            + modelo
-            + ":generateContent?key="
-            + GEMINI_API_KEY
-        )
 
         corpo = {
             "contents": [
@@ -214,173 +346,114 @@ Use essas informacoes quando forem uteis para responder.
             "utf-8"
         )
 
-        try:
+        resposta_texto = None
+        modelo_usado = None
 
-            resposta_texto = chamar_gemini(
-                url,
+        # ==================================================
+        # TENTA TODOS OS MODELOS AUTOMATICAMENTE
+        # ==================================================
+
+        for modelo in MODELOS_GEMINI:
+
+            print("")
+            print(
+                "TENTANDO MODELO:",
+                modelo
+            )
+
+            resposta_texto = enviar_para_gemini(
+                modelo,
                 dados_envio
             )
 
-            resposta_json = json.loads(
-                resposta_texto
-            )
+            if resposta_texto:
 
-            candidatos = resposta_json.get(
-                "candidates",
-                []
-            )
+                try:
 
-            if not candidatos:
-
-                print(
-                    "O GEMINI NAO RETORNOU CANDIDATOS."
-                )
-
-                return jsonify({
-                    "erro": "O Gemini nao retornou uma resposta."
-                }), 500
-
-            conteudo = candidatos[0].get(
-                "content",
-                {}
-            )
-
-            partes = conteudo.get(
-                "parts",
-                []
-            )
-
-            if not partes:
-
-                print(
-                    "O GEMINI NAO RETORNOU PARTES DE TEXTO."
-                )
-
-                return jsonify({
-                    "erro": "O Gemini nao retornou texto."
-                }), 500
-
-            textos = []
-
-            for parte in partes:
-
-                texto_parte = parte.get(
-                    "text",
-                    ""
-                )
-
-                if texto_parte:
-                    textos.append(
-                        texto_parte
+                    texto = extrair_resposta(
+                        resposta_texto
                     )
 
-            texto = "\n".join(
-                textos
-            ).strip()
+                    if texto:
 
-            if not texto:
+                        # Remove ** caso o modelo envie.
+                        texto = texto.replace(
+                            "**",
+                            ""
+                        ).strip()
 
-                return jsonify({
-                    "erro": "O Gemini retornou uma resposta vazia."
-                }), 500
+                        modelo_usado = modelo
 
-            # Remove asteriscos duplos caso o Gemini envie
-            texto = texto.replace(
-                "**",
-                ""
-            )
+                        print("")
+                        print(
+                            "========================================"
+                        )
+                        print(
+                            "RESPOSTA OBTIDA COM SUCESSO"
+                        )
+                        print(
+                            "MODELO USADO:",
+                            modelo_usado
+                        )
+                        print(
+                            "========================================"
+                        )
+
+                        return jsonify({
+                            "resposta": texto
+                        })
+
+                except Exception as erro:
+
+                    print(
+                        "Erro ao interpretar "
+                        "resposta do modelo:",
+                        str(erro)
+                    )
 
             print(
-                "SUCESSO! GEMINI RESPONDEU."
+                "Mudando automaticamente para "
+                "o proximo modelo..."
             )
 
-            return jsonify({
-                "resposta": texto
-            })
+        # ==================================================
+        # TODOS OS MODELOS FALHARAM
+        # ==================================================
 
-        except urllib.error.HTTPError as erro:
+        print("")
+        print(
+            "========================================"
+        )
+        print(
+            "TODOS OS MODELOS FALHARAM"
+        )
+        print(
+            "========================================"
+        )
 
-            corpo_erro = erro.read().decode(
-                "utf-8",
-                errors="replace"
+        return jsonify({
+            "erro": (
+                "O servico de inteligencia "
+                "artificial esta temporariamente "
+                "indisponivel. Tente novamente."
             )
-
-            try:
-
-                erro_json = json.loads(
-                    corpo_erro
-                )
-
-                mensagem = (
-                    erro_json
-                    .get(
-                        "error",
-                        {}
-                    )
-                    .get(
-                        "message",
-                        ""
-                    )
-                )
-
-            except Exception:
-
-                mensagem = corpo_erro
-
-            if erro.code in [
-                429,
-                500,
-                502,
-                503,
-                504
-            ]:
-
-                mensagem = (
-                    "A inteligencia artificial esta "
-                    "temporariamente ocupada. "
-                    "Tente novamente em alguns instantes."
-                )
-
-            if not mensagem:
-
-                mensagem = (
-                    "Erro desconhecido do Google."
-                )
-
-            return jsonify({
-                "erro": mensagem
-            }), erro.code
-
-        except urllib.error.URLError:
-
-            return jsonify({
-                "erro": (
-                    "Nao foi possivel conectar "
-                    "ao servico de inteligencia artificial."
-                )
-            }), 503
-
-        except Exception as erro:
-
-            print("========================================")
-            print("ERRO AO ACESSAR O GEMINI")
-            print(str(erro))
-            print("========================================")
-
-            return jsonify({
-                "erro": (
-                    "O Meu Dia nao conseguiu acessar "
-                    "a inteligencia artificial agora. "
-                    "Tente novamente."
-                )
-            }), 500
+        }), 503
 
     except Exception as erro:
 
-        print("========================================")
-        print("ERRO INTERNO DO SERVIDOR")
-        print(str(erro))
-        print("========================================")
+        print("")
+        print(
+            "========================================"
+        )
+        print(
+            "ERRO INTERNO DO SERVIDOR"
+        )
+        print(
+            str(erro)
+        )
+        print(
+            "========================================"
+        )
 
         return jsonify({
             "erro": str(erro)
@@ -394,6 +467,36 @@ if __name__ == "__main__":
             "PORT",
             5000
         )
+    )
+
+    print("")
+    print(
+        "========================================"
+    )
+    print(
+        "SERVIDOR MEU DIA INICIANDO"
+    )
+    print(
+        "PORTA:",
+        porta
+    )
+    print(
+        "MODELOS DISPONIVEIS:"
+    )
+
+    for modelo in MODELOS_GEMINI:
+        print(
+            "-",
+            modelo
+        )
+
+    print(
+        "GEMINI CONFIGURADO:",
+        bool(GEMINI_API_KEY)
+    )
+
+    print(
+        "========================================"
     )
 
     app.run(
