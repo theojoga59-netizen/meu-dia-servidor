@@ -1,4 +1,3 @@
-python
 from flask import Flask, request, jsonify, render_template_string
 import urllib.request
 import urllib.error
@@ -16,8 +15,10 @@ app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
+# Modelo principal
 MODELO_RAPIDO = "gemini-3.8-flash"
 
+# Modelos de reserva
 MODELOS_RESERVA = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
@@ -27,6 +28,10 @@ MODELOS_RESERVA = [
 TIMEOUT_NORMAL = 30
 TIMEOUT_DESENVOLVEDORA = 90
 TENTATIVAS_POR_MODELO = 1
+
+# Limite de arquivo enviado para análise.
+# 500 KB é suficiente para arquivos Kotlin/XML comuns.
+TAMANHO_MAXIMO_ARQUIVO = 500 * 1024
 
 # ============================================================
 # ESTADO DA IA DESENVOLVEDORA
@@ -60,10 +65,51 @@ def atualizar_estado(**kwargs):
     estado_desenvolvedora["ultima_atualizacao"] = agora()
 
 
+def texto_seguro(valor, limite=200000):
+    """
+    Converte qualquer valor para texto e aplica um limite.
+    """
+    if valor is None:
+        return ""
+
+    texto = str(valor)
+
+    if len(texto) > limite:
+        texto = texto[:limite] + "\n\n[conteúdo cortado pelo servidor]"
+
+    return texto
+
+
+def nome_arquivo_seguro(nome):
+    """
+    Evita caminhos maliciosos vindos do nome do arquivo.
+    """
+    if not nome:
+        return "arquivo"
+
+    nome = os.path.basename(nome)
+
+    caracteres_permitidos = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "._-"
+    )
+
+    nome_limpo = "".join(
+        caractere
+        for caractere in nome
+        if caractere in caracteres_permitidos
+    )
+
+    return nome_limpo or "arquivo"
+
+
+# ============================================================
+# GEMINI
+# ============================================================
+
 def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
-    """
-    Envia uma pergunta para a API Gemini.
-    """
 
     if not GEMINI_API_KEY:
         return {
@@ -77,8 +123,7 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + modelo
-        + ":generateContent?key="
-        + GEMINI_API_KEY
+        + ":generateContent"
     )
 
     dados = {
@@ -98,18 +143,23 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
         }
     }
 
-    corpo = json.dumps(dados).encode("utf-8")
+    corpo = json.dumps(
+        dados,
+        ensure_ascii=False
+    ).encode("utf-8")
 
     requisicao = urllib.request.Request(
         url,
         data=corpo,
         headers={
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
         },
         method="POST"
     )
 
     try:
+
         with urllib.request.urlopen(
             requisicao,
             timeout=timeout
@@ -119,29 +169,61 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
 
             dados_resposta = json.loads(texto)
 
-            candidatos = dados_resposta.get("candidates", [])
+            candidatos = dados_resposta.get(
+                "candidates",
+                []
+            )
 
             if not candidatos:
+
                 return {
                     "ok": False,
                     "erro": "Gemini não retornou candidatos."
                 }
 
-            partes = candidatos[0].get(
-                "content", {}
-            ).get(
-                "parts", []
-            )
-
             textos = []
 
-            for parte in partes:
-                if "text" in parte:
-                    textos.append(parte["text"])
+            for candidato in candidatos:
+
+                conteudo = candidato.get(
+                    "content",
+                    {}
+                )
+
+                partes = conteudo.get(
+                    "parts",
+                    []
+                )
+
+                for parte in partes:
+
+                    if "text" in parte:
+
+                        textos.append(
+                            str(parte["text"])
+                        )
 
             resultado = "\n".join(textos).strip()
 
             if not resultado:
+
+                # Alguns erros podem aparecer no próprio JSON.
+                erro_api = dados_resposta.get(
+                    "error",
+                    {}
+                )
+
+                mensagem_api = erro_api.get(
+                    "message"
+                )
+
+                if mensagem_api:
+
+                    return {
+                        "ok": False,
+                        "erro": str(mensagem_api)
+                    }
+
                 return {
                     "ok": False,
                     "erro": "Gemini retornou uma resposta vazia."
@@ -165,6 +247,27 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
             "erro": f"Erro HTTP {e.code}: {detalhe}"
         }
 
+    except urllib.error.URLError as e:
+
+        return {
+            "ok": False,
+            "erro": f"Erro de conexão com Gemini: {e.reason}"
+        }
+
+    except TimeoutError:
+
+        return {
+            "ok": False,
+            "erro": "Tempo limite excedido ao falar com Gemini."
+        }
+
+    except json.JSONDecodeError:
+
+        return {
+            "ok": False,
+            "erro": "Gemini retornou uma resposta inválida."
+        }
+
     except Exception as e:
 
         return {
@@ -178,9 +281,6 @@ def chamar_gemini_com_fallback(
     timeout=TIMEOUT_NORMAL,
     desenvolvedora=False
 ):
-    """
-    Tenta o modelo principal e depois modelos reserva.
-    """
 
     modelos = [
         MODELO_RAPIDO
@@ -190,7 +290,9 @@ def chamar_gemini_com_fallback(
 
     for modelo in modelos:
 
-        for tentativa in range(TENTATIVAS_POR_MODELO):
+        for tentativa in range(
+            TENTATIVAS_POR_MODELO
+        ):
 
             resultado = chamar_gemini(
                 prompt,
@@ -199,6 +301,7 @@ def chamar_gemini_com_fallback(
             )
 
             if resultado.get("ok"):
+
                 return resultado
 
             ultimo_erro = resultado.get(
@@ -206,7 +309,11 @@ def chamar_gemini_com_fallback(
                 "Erro desconhecido."
             )
 
-            time.sleep(0.5)
+            # Pequena pausa antes do próximo modelo.
+            if tentativa + 1 < TENTATIVAS_POR_MODELO:
+                time.sleep(0.5)
+
+        # Se um modelo falhou, tenta o próximo.
 
     return {
         "ok": False,
@@ -215,10 +322,11 @@ def chamar_gemini_com_fallback(
 
 
 # ============================================================
-# PROMPT NORMAL DO MEU DIA
+# PROMPT NORMAL
 # ============================================================
 
 def criar_prompt_normal(pergunta, contexto):
+
     return f"""
 Você é a IA do aplicativo Meu Dia.
 
@@ -239,401 +347,96 @@ Responda somente o necessário para ajudar o usuário.
 
 
 # ============================================================
-# ROTA PRINCIPAL
+# PROMPT DA IA DESENVOLVEDORA
 # ============================================================
 
-@app.route("/")
-def inicio():
+def criar_prompt_analise(nome_arquivo, codigo):
 
-    return jsonify({
-        "servidor": "Meu Dia",
-        "status": "online",
-        "mensagem": "Servidor funcionando corretamente!",
-        "gemini_configurado": bool(GEMINI_API_KEY),
-        "ia_desenvolvedora": "ativa"
-    })
+    return f"""
+Você é a IA Desenvolvedora do aplicativo Meu Dia.
 
+Sua função é analisar código de aplicativos Android e ajudar a
+corrigir problemas com segurança.
 
-# ============================================================
-# STATUS
-# ============================================================
+Analise o arquivo abaixo.
 
-@app.route("/status")
-def status():
+ARQUIVO:
+{nome_arquivo}
 
-    return jsonify({
-        "servidor": "Meu Dia",
-        "status": "online",
-        "gemini_configurado": bool(GEMINI_API_KEY),
-        "ia_desenvolvedora": True
-    })
+CÓDIGO:
+---------------- INÍCIO DO CÓDIGO ----------------
 
+{codigo}
 
-@app.route("/saude")
-def saude():
+----------------- FIM DO CÓDIGO -----------------
 
-    return jsonify({
-        "ok": True,
-        "servidor": "Meu Dia",
-        "gemini_configurado": bool(GEMINI_API_KEY),
-        "hora": agora()
-    })
+Faça uma análise técnica em português do Brasil.
 
+Informe:
 
-# ============================================================
-# PERGUNTAR
-# ============================================================
+1. Se o código parece válido.
+2. Possíveis erros de compilação.
+3. Possíveis erros de execução.
+4. Problemas de lógica.
+5. Problemas de compatibilidade.
+6. Melhorias recomendadas.
+7. Se for necessário alterar o arquivo, explique exatamente o que
+precisa ser corrigido.
 
-@app.route("/perguntar", methods=["POST"])
-def perguntar():
+Não invente erros que não estejam relacionados ao código fornecido.
 
-    try:
+Não altere o código nesta etapa.
 
-        dados = request.get_json(silent=True) or {}
+A resposta deve ser clara e organizada.
+"""
 
-        pergunta = str(
-            dados.get("pergunta", "")
-        ).strip()
 
-        contexto = str(
-            dados.get("contexto", "")
-        ).strip()
+def criar_prompt_geracao(
+    nome_arquivo,
+    codigo_original,
+    analise
+):
 
-        if not pergunta:
+    return f"""
+Você é a IA Desenvolvedora do aplicativo Meu Dia.
 
-            return jsonify({
-                "resposta": "Digite uma pergunta."
-            }), 400
+Sua tarefa agora é corrigir o arquivo fornecido.
 
-        prompt = criar_prompt_normal(
-            pergunta,
-            contexto
-        )
+ARQUIVO:
+{nome_arquivo}
 
-        resultado = chamar_gemini_com_fallback(
-            prompt,
-            timeout=TIMEOUT_NORMAL
-        )
+CÓDIGO ORIGINAL:
+---------------- INÍCIO ----------------
 
-        if not resultado.get("ok"):
+{codigo_original}
 
-            return jsonify({
-                "resposta": (
-                    "Não consegui falar com a IA agora. "
-                    + resultado.get("erro", "")
-                )
-            }), 500
+---------------- FIM ----------------
 
-        return jsonify({
-            "resposta": resultado["resposta"],
-            "modelo": resultado.get("modelo")
-        })
+ANÁLISE:
+---------------- INÍCIO ----------------
 
-    except Exception as e:
+{analise}
 
-        return jsonify({
-            "resposta": "Erro no servidor.",
-            "erro": str(e)
-        }), 500
-
-
-# ============================================================
-# STATUS DA IA DESENVOLVEDORA
-# ============================================================
-
-@app.route("/desenvolvedora/status")
-def desenvolvedora_status():
-
-    return jsonify({
-        "servidor": "Meu Dia",
-        "ia_desenvolvedora": True,
-        "estado": estado_desenvolvedora
-    })
-
-
-# ============================================================
-# PAINEL DA IA DESENVOLVEDORA
-# ============================================================
-
-@app.route("/desenvolvedora")
-def painel_desenvolvedora():
-
-    html = """
-<!DOCTYPE html>
-<html lang="pt-BR">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
-
-<title>IA Desenvolvedora - Meu Dia</title>
-
-<style>
-
-body {
-    font-family: Arial, sans-serif;
-    background: #f2f2f2;
-    margin: 0;
-    padding: 20px;
-}
-
-.container {
-    max-width: 900px;
-    margin: auto;
-    background: white;
-    padding: 25px;
-    border-radius: 12px;
-    box-shadow: 0 2px 10px rgba(0,0,0,.15);
-}
-
-h1 {
-    margin-top: 0;
-}
-
-button {
-    padding: 12px 18px;
-    margin: 5px;
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 16px;
-}
-
-.analisar {
-    background: #1976d2;
-    color: white;
-}
-
-.gerar {
-    background: #388e3c;
-    color: white;
-}
-
-.autorizar {
-    background: #7b1fa2;
-    color: white;
-}
-
-.rejeitar {
-    background: #d32f2f;
-    color: white;
-}
-
-button:disabled {
-    background: #999;
-    cursor: not-allowed;
-}
-
-pre {
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    background: #111;
-    color: #eee;
-    padding: 15px;
-    border-radius: 8px;
-    overflow-x: auto;
-}
-
-.caixa {
-    margin-top: 20px;
-}
-
-.status {
-    padding: 12px;
-    background: #eee;
-    border-radius: 8px;
-    margin-top: 10px;
-}
+---------------- FIM ----------------
 
-</style>
+REGRAS IMPORTANTES:
 
-</head>
+1. Gere o arquivo COMPLETO.
+2. Não entregue apenas trechos.
+3. Preserve as partes que já estão funcionando.
+4. Corrija somente o que for necessário.
+5. Não invente dependências sem necessidade.
+6. Não remova funcionalidades existentes sem explicar.
+7. Para Kotlin, entregue Kotlin completo.
+8. Para XML, entregue XML completo.
+9. Para Gradle, entregue o arquivo Gradle completo.
+10. O resultado deve estar pronto para substituir o arquivo original.
 
-<body>
+A resposta DEVE seguir exatamente este formato:
 
-<div class="container">
+EXPLICACAO:
+Uma explicação curta das correções realizadas.
 
-<h1>🤖 IA Desenvolvedora do Meu Dia</h1>
-
-<p>
-Envie um arquivo do projeto Android para a IA analisar.
-</p>
-
-<input
-    type="file"
-    id="arquivo"
-    accept=".kt,.java,.xml,.gradle,.txt,.json"
->
-
-<br><br>
-
-<button
-    class="analisar"
-    onclick="analisarArquivo()"
->
-🔍 Analisar código
-</button>
-
-<button
-    id="botaoGerar"
-    class="gerar"
-    onclick="gerarCodigo()"
-    disabled
->
-🛠️ Gerar código
-</button>
-
-<button
-    id="botaoAutorizar"
-    class="autorizar"
-    onclick="autorizar()"
-    disabled
->
-✅ Autorizar
-</button>
-
-<button
-    id="botaoRejeitar"
-    class="rejeitar"
-    onclick="rejeitar()"
-    disabled
->
-❌ Rejeitar
-</button>
-
-<div class="caixa">
-
-<h3>Status</h3>
-
-<div id="status" class="status">
-Pronta.
-</div>
-
-</div>
-
-<div class="caixa">
-
-<h3>Resultado da análise</h3>
-
-<pre id="analise">
-Nenhuma análise realizada ainda.
-</pre>
-
-</div>
-
-<div class="caixa">
-
-<h3>Código gerado</h3>
-
-<pre id="codigo">
-Nenhum código gerado ainda.
-</pre>
-
-</div>
-
-</div>
-
-<script>
-
-let ultimaAnalise = null;
-let ultimoArquivo = null;
-
-async function analisarArquivo() {
-
-    const input = document.getElementById("arquivo");
-
-    if (!input.files.length) {
-
-        alert("Escolha primeiro um arquivo.");
-
-        return;
-    }
-
-    ultimoArquivo = input.files[0];
-
-    const formulario = new FormData();
-
-    formulario.append(
-        "arquivo",
-        ultimoArquivo
-    );
-
-    document.getElementById("status").innerText =
-        "🔍 Analisando arquivo...";
-
-    document.getElementById("botaoGerar").disabled = true;
-
-    try {
-
-        const resposta = await fetch(
-            "/desenvolvedora/analisar-arquivo",
-            {
-                method: "POST",
-                body: formulario
-            }
-        );
-
-        const dados = await resposta.json();
-
-        if (!resposta.ok) {
-
-            throw new Error(
-                dados.erro || "Erro na análise."
-            );
-        }
-
-        ultimaAnalise = dados;
-
-        document.getElementById("analise").innerText =
-            dados.analise || "Sem análise.";
-
-        document.getElementById("status").innerText =
-            "✅ Análise concluída.";
-
-        document.getElementById("botaoGerar").disabled =
-            false;
-
-    } catch (erro) {
-
-        document.getElementById("status").innerText =
-            "❌ Erro: " + erro.message;
-
-    }
-}
-
-
-async function gerarCodigo() {
-
-    if (!ultimaAnalise || !ultimoArquivo) {
-
-        alert("Faça primeiro a análise.");
-
-        return;
-    }
-
-    const formulario = new FormData();
-
-    formulario.append(
-        "arquivo",
-        ultimoArquivo
-    );
-
-    formulario.append(
-        "analise",
-        ultimaAnalise.analise || ""
-    );
-
-    document.getElementById("status").innerText =
-        "🛠️ Gerando código...";
-
-    document.getElementById("botaoGerar").disabled =
-        true;
-
-    try {
-
-        const resposta = await fetch(
-            "/desenvolvedora/ger
-
+CODIGO:
+```texto
+COLOQUE AQUI O ARQUIVO COMPLETO CORRIGIDO
