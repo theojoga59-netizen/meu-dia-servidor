@@ -72,7 +72,7 @@ class IaViewModel : ViewModel() {
     }
 
     private fun enviarPostParaRender(pergunta: String, contexto: String): String? {
-        val url = URL("https://SEU-APP-NO-RENDER.onrender.com/perguntar") // Substitua pela sua URL real do Render
+        val url = URL("https://NOME-DO-SEU-APP.onrender.com/perguntar") // Substitua pela sua URL real do Render
         val conexao = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
