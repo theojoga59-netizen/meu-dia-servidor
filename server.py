@@ -1,3 +1,4 @@
+python
 from flask import Flask, request, jsonify, render_template_string
 import urllib.request
 import urllib.error
@@ -10,28 +11,25 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO DO GEMINI
 # ============================================================
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Modelo principal
 MODELO_RAPIDO = "gemini-3.8-flash"
 
-# Modelos de reserva
 MODELOS_RESERVA = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
 ]
 
 TIMEOUT_NORMAL = 30
 TIMEOUT_DESENVOLVEDORA = 90
+
 TENTATIVAS_POR_MODELO = 1
 
-# Limite de arquivo enviado para análise.
-# 500 KB é suficiente para arquivos Kotlin/XML comuns.
-TAMANHO_MAXIMO_ARQUIVO = 500 * 1024
 
 # ============================================================
 # ESTADO DA IA DESENVOLVEDORA
@@ -66,28 +64,22 @@ def atualizar_estado(**kwargs):
 
 
 def texto_seguro(valor, limite=200000):
-    """
-    Converte qualquer valor para texto e aplica um limite.
-    """
     if valor is None:
         return ""
 
     texto = str(valor)
 
     if len(texto) > limite:
-        texto = texto[:limite] + "\n\n[conteúdo cortado pelo servidor]"
+        texto = texto[:limite]
 
     return texto
 
 
 def nome_arquivo_seguro(nome):
-    """
-    Evita caminhos maliciosos vindos do nome do arquivo.
-    """
     if not nome:
-        return "arquivo"
+        return "arquivo.txt"
 
-    nome = os.path.basename(nome)
+    nome = os.path.basename(str(nome))
 
     caracteres_permitidos = (
         "abcdefghijklmnopqrstuvwxyz"
@@ -96,13 +88,16 @@ def nome_arquivo_seguro(nome):
         "._-"
     )
 
-    nome_limpo = "".join(
-        caractere
-        for caractere in nome
-        if caractere in caracteres_permitidos
-    )
+    resultado = ""
 
-    return nome_limpo or "arquivo"
+    for caractere in nome:
+        if caractere in caracteres_permitidos:
+            resultado += caractere
+
+    if not resultado:
+        return "arquivo.txt"
+
+    return resultado
 
 
 # ============================================================
@@ -121,7 +116,8 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
         modelo = MODELO_RAPIDO
 
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/"
         + modelo
         + ":generateContent"
     )
@@ -135,18 +131,10 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
                     }
                 ]
             }
-        ],
-        "generationConfig": {
-            "thinkingConfig": {
-                "thinkingLevel": "low"
-            }
-        }
+        ]
     }
 
-    corpo = json.dumps(
-        dados,
-        ensure_ascii=False
-    ).encode("utf-8")
+    corpo = json.dumps(dados).encode("utf-8")
 
     requisicao = urllib.request.Request(
         url,
@@ -169,60 +157,35 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
 
             dados_resposta = json.loads(texto)
 
-            candidatos = dados_resposta.get(
-                "candidates",
-                []
-            )
+            candidatos = dados_resposta.get("candidates", [])
 
             if not candidatos:
-
                 return {
                     "ok": False,
                     "erro": "Gemini não retornou candidatos."
                 }
 
+            partes = candidatos[0].get(
+                "content",
+                {}
+            ).get(
+                "parts",
+                []
+            )
+
             textos = []
 
-            for candidato in candidatos:
+            for parte in partes:
 
-                conteudo = candidato.get(
-                    "content",
-                    {}
-                )
+                if "text" in parte:
 
-                partes = conteudo.get(
-                    "parts",
-                    []
-                )
-
-                for parte in partes:
-
-                    if "text" in parte:
-
-                        textos.append(
-                            str(parte["text"])
-                        )
+                    textos.append(
+                        str(parte["text"])
+                    )
 
             resultado = "\n".join(textos).strip()
 
             if not resultado:
-
-                # Alguns erros podem aparecer no próprio JSON.
-                erro_api = dados_resposta.get(
-                    "error",
-                    {}
-                )
-
-                mensagem_api = erro_api.get(
-                    "message"
-                )
-
-                if mensagem_api:
-
-                    return {
-                        "ok": False,
-                        "erro": str(mensagem_api)
-                    }
 
                 return {
                     "ok": False,
@@ -235,44 +198,38 @@ def chamar_gemini(prompt, modelo=None, timeout=TIMEOUT_NORMAL):
                 "resposta": resultado
             }
 
-    except urllib.error.HTTPError as e:
+    except urllib.error.HTTPError as erro_http:
 
         try:
-            detalhe = e.read().decode("utf-8")
+            detalhe = erro_http.read().decode("utf-8")
         except Exception:
-            detalhe = str(e)
+            detalhe = str(erro_http)
 
         return {
             "ok": False,
-            "erro": f"Erro HTTP {e.code}: {detalhe}"
+            "erro": (
+                "Erro HTTP "
+                + str(erro_http.code)
+                + ": "
+                + detalhe
+            )
         }
 
-    except urllib.error.URLError as e:
+    except urllib.error.URLError as erro_url:
 
         return {
             "ok": False,
-            "erro": f"Erro de conexão com Gemini: {e.reason}"
+            "erro": (
+                "Erro de conexão com Gemini: "
+                + str(erro_url)
+            )
         }
 
-    except TimeoutError:
+    except Exception as erro:
 
         return {
             "ok": False,
-            "erro": "Tempo limite excedido ao falar com Gemini."
-        }
-
-    except json.JSONDecodeError:
-
-        return {
-            "ok": False,
-            "erro": "Gemini retornou uma resposta inválida."
-        }
-
-    except Exception as e:
-
-        return {
-            "ok": False,
-            "erro": str(e)
+            "erro": str(erro)
         }
 
 
@@ -301,7 +258,6 @@ def chamar_gemini_com_fallback(
             )
 
             if resultado.get("ok"):
-
                 return resultado
 
             ultimo_erro = resultado.get(
@@ -309,11 +265,7 @@ def chamar_gemini_com_fallback(
                 "Erro desconhecido."
             )
 
-            # Pequena pausa antes do próximo modelo.
-            if tentativa + 1 < TENTATIVAS_POR_MODELO:
-                time.sleep(0.5)
-
-        # Se um modelo falhou, tenta o próximo.
+            time.sleep(0.5)
 
     return {
         "ok": False,
@@ -322,121 +274,189 @@ def chamar_gemini_com_fallback(
 
 
 # ============================================================
-# PROMPT NORMAL
+# IA NORMAL DO MEU DIA
 # ============================================================
 
-def criar_prompt_normal(pergunta, contexto):
+def criar_prompt_normal(
+    pergunta,
+    contexto
+):
 
-    return f"""
-Você é a IA do aplicativo Meu Dia.
-
-Responda ao usuário em português do Brasil.
-
-Seja útil, clara e direta.
-
-Você recebeu o seguinte contexto do aplicativo:
-
-{contexto}
-
-Pergunta do usuário:
-
-{pergunta}
-
-Responda somente o necessário para ajudar o usuário.
-"""
+    return (
+        "Você é a IA do aplicativo Meu Dia.\n"
+        "Responda ao usuário em português do Brasil.\n"
+        "Seja útil, clara e direta.\n\n"
+        "Contexto do aplicativo:\n"
+        + texto_seguro(contexto, 50000)
+        + "\n\n"
+        "Pergunta do usuário:\n"
+        + texto_seguro(pergunta, 10000)
+        + "\n\n"
+        "Responda somente o necessário para ajudar o usuário."
+    )
 
 
 # ============================================================
 # PROMPT DA IA DESENVOLVEDORA
 # ============================================================
 
-def criar_prompt_analise(nome_arquivo, codigo):
-
-    return f"""
-Você é a IA Desenvolvedora do aplicativo Meu Dia.
-
-Sua função é analisar código de aplicativos Android e ajudar a
-corrigir problemas com segurança.
-
-Analise o arquivo abaixo.
-
-ARQUIVO:
-{nome_arquivo}
-
-CÓDIGO:
----------------- INÍCIO DO CÓDIGO ----------------
-
-{codigo}
-
------------------ FIM DO CÓDIGO -----------------
-
-Faça uma análise técnica em português do Brasil.
-
-Informe:
-
-1. Se o código parece válido.
-2. Possíveis erros de compilação.
-3. Possíveis erros de execução.
-4. Problemas de lógica.
-5. Problemas de compatibilidade.
-6. Melhorias recomendadas.
-7. Se for necessário alterar o arquivo, explique exatamente o que
-precisa ser corrigido.
-
-Não invente erros que não estejam relacionados ao código fornecido.
-
-Não altere o código nesta etapa.
-
-A resposta deve ser clara e organizada.
-"""
-
-
-def criar_prompt_geracao(
-    nome_arquivo,
-    codigo_original,
-    analise
+def criar_prompt_analise(
+    arquivo,
+    codigo
 ):
 
-    return f"""
-Você é a IA Desenvolvedora do aplicativo Meu Dia.
+    return (
+        "Você é a IA Desenvolvedora do aplicativo Meu Dia.\n\n"
 
-Sua tarefa agora é corrigir o arquivo fornecido.
+        "Sua função é analisar código de um projeto Android "
+        "e identificar problemas de compilação, execução, "
+        "estrutura, lógica e integração.\n\n"
 
-ARQUIVO:
-{nome_arquivo}
+        "Você deve ser extremamente cuidadosa.\n"
 
-CÓDIGO ORIGINAL:
----------------- INÍCIO ----------------
+        "Analise o arquivo abaixo.\n\n"
 
-{codigo_original}
+        "NOME DO ARQUIVO:\n"
+        + nome_arquivo_seguro(arquivo)
+        + "\n\n"
 
----------------- FIM ----------------
+        "CÓDIGO:\n"
+        + texto_seguro(codigo, 180000)
+        + "\n\n"
 
-ANÁLISE:
----------------- INÍCIO ----------------
+        "Retorne uma análise contendo:\n"
+        "1. Problemas encontrados.\n"
+        "2. Causa provável de cada problema.\n"
+        "3. O que precisa ser corrigido.\n"
+        "4. Possíveis consequências.\n"
+        "5. Se o arquivo parece estar correto, diga isso claramente.\n\n"
 
-{analise}
+        "Não invente erros que não estejam relacionados ao código."
+    )
 
----------------- FIM ----------------
 
-REGRAS IMPORTANTES:
+def criar_prompt_codigo(
+    arquivo,
+    codigo,
+    instrucoes
+):
 
-1. Gere o arquivo COMPLETO.
-2. Não entregue apenas trechos.
-3. Preserve as partes que já estão funcionando.
-4. Corrija somente o que for necessário.
-5. Não invente dependências sem necessidade.
-6. Não remova funcionalidades existentes sem explicar.
-7. Para Kotlin, entregue Kotlin completo.
-8. Para XML, entregue XML completo.
-9. Para Gradle, entregue o arquivo Gradle completo.
-10. O resultado deve estar pronto para substituir o arquivo original.
+    return (
+        "Você é a IA Desenvolvedora do aplicativo Meu Dia.\n\n"
 
-A resposta DEVE seguir exatamente este formato:
+        "Sua tarefa é corrigir ou melhorar um arquivo de código "
+        "Android de forma completa.\n\n"
 
-EXPLICACAO:
-Uma explicação curta das correções realizadas.
+        "REGRA MUITO IMPORTANTE:\n"
+        "Retorne o ARQUIVO COMPLETO corrigido.\n"
+        "Nunca retorne somente um trecho.\n"
+        "O usuário substituirá o arquivo inteiro pelo resultado.\n\n"
 
-CODIGO:
-```texto
-COLOQUE AQUI O ARQUIVO COMPLETO CORRIGIDO
+        "ARQUIVO:\n"
+        + nome_arquivo_seguro(arquivo)
+        + "\n\n"
+
+        "CÓDIGO ATUAL:\n"
+        + texto_seguro(codigo, 180000)
+        + "\n\n"
+
+        "INSTRUÇÕES DO USUÁRIO:\n"
+        + texto_seguro(instrucoes, 30000)
+        + "\n\n"
+
+        "Regras:\n"
+        "- Preserve o que já funciona.\n"
+        "- Corrija erros de sintaxe.\n"
+        "- Corrija imports quando necessário.\n"
+        "- Evite criar dependências desnecessárias.\n"
+        "- Não apague funcionalidades existentes sem motivo.\n"
+        "- Entregue código completo.\n"
+        "- Não coloque explicações dentro do código.\n\n"
+
+        "A resposta deve começar diretamente com o código "
+        "ou com um único bloco de código."
+    )
+
+
+# ============================================================
+# EXTRAÇÃO DO CÓDIGO
+# ============================================================
+
+def extrair_codigo_gerado(texto):
+
+    texto = texto.strip()
+
+    if "```" not in texto:
+        return texto
+
+    partes = texto.split("```")
+
+    candidatos = []
+
+    for i in range(
+        1,
+        len(partes),
+        2
+    ):
+
+        bloco = partes[i].strip()
+
+        linhas = bloco.splitlines()
+
+        if linhas:
+
+            primeira = linhas[0].strip().lower()
+
+            linguagens = [
+                "kotlin",
+                "java",
+                "xml",
+                "gradle",
+                "python",
+                "json",
+                "javascript",
+                "js",
+                "html",
+                "css",
+                "text",
+                "txt"
+            ]
+
+            if primeira in linguagens:
+
+                bloco = "\n".join(
+                    linhas[1:]
+                )
+
+        candidatos.append(
+            bloco.strip()
+        )
+
+    if not candidatos:
+        return texto
+
+    candidatos.sort(
+        key=len,
+        reverse=True
+    )
+
+    return candidatos[0]
+
+
+def extrair_explicacao(texto):
+
+    texto = texto.strip()
+
+    if "```" not in texto:
+        return ""
+
+    antes = texto.split(
+        "```",
+        1
+    )[0].strip()
+
+    return antes
+
+
+# ============================
+
